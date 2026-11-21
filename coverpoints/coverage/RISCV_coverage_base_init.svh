@@ -158,6 +158,10 @@
         `cover_info("//      Smstateen - Enabled");
         `include "Smstateen_coverage_init.svh"
     `endif
+    `ifdef COVER_SMVATAG
+        `cover_info("//      Smvatag - Enabled");
+        `include "Smvatag_coverage_init.svh"
+    `endif
     `ifdef COVER_SSCCPTR
         `cover_info("//      Ssccptr - Enabled");
         `include "Ssccptr_coverage_init.svh"
@@ -213,6 +217,10 @@
     `ifdef COVER_SVADU
         `cover_info("//      Svadu - Enabled");
         `include "Svadu_coverage_init.svh"
+    `endif
+    `ifdef COVER_SVATAG
+        `cover_info("//      Svatag - Enabled");
+        `include "Svatag_coverage_init.svh"
     `endif
     `ifdef COVER_SVBARE
         `cover_info("//      Svbare - Enabled");
@@ -461,6 +469,10 @@
     `ifdef COVER_ZIMOP
         `cover_info("//      Zimop - Enabled");
         `include "Zimop_coverage_init.svh"
+    `endif
+    `ifdef COVER_ZIMT
+        `cover_info("//      Zimt - Enabled");
+        `include "Zimt_coverage_init.svh"
     `endif
     `ifdef COVER_ZKND
         `cover_info("//      Zknd - Enabled");

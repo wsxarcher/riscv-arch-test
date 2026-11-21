@@ -42,6 +42,8 @@ tests/priv/headers
 tests/priv/**/*.S
 !tests/priv/PMP*/**/*.S
 !tests/priv/*Sv*/**/*.S
+# Svatag (memory tagging) matches *Sv*, but its tests are generated like the other priv tests
+tests/priv/Svatag/**/*.S
 
 # docs
 docs/crd/build

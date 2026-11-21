@@ -2120,6 +2120,15 @@ tsbi_csr_mstatus:                                 // dispatcher fast path
         TSBI_CSR_INSTR_TABLE(0x351) // mireg
         TSBI_CSR_INSTR_TABLE(0x35C) // mtopei
         TSBI_CSR_INSTR_TABLE(0x5A8) // scontext
+        // Zimt, Svatag and Smvatag CSRs: experimental, at the Sail model's placeholder addresses (rvtest_experimental.h)
+        #if defined(ZIMT_SUPPORTED) && defined(S_SUPPORTED)
+        TSBI_CSR_INSTR_TABLE(0x5C0) // senvmtagexclude0
+        TSBI_CSR_INSTR_TABLE(0x5C1) // senvmtagexclude1
+        #endif
+        #if defined(SVATAG_SUPPORTED) && defined(S_SUPPORTED)
+        TSBI_CSR_INSTR_TABLE(0x5C2) // svitts
+        TSBI_CSR_INSTR_TABLE(0x5C3) // svittu
+        #endif
 #ifdef H_SUPPORTED
         // Hypervisor CSRs
         TSBI_CSR_INSTR_TABLE(0x600) // hstatus
@@ -2154,6 +2163,14 @@ tsbi_csr_mstatus:                                 // dispatcher fast path
         TSBI_CSR_INSTR_TABLE(0x680) // hgatp
 #endif // H_SUPPORTED
         TSBI_CSR_INSTR_TABLE(0x6A8) // hcontext
+        #if defined(ZIMT_SUPPORTED) && defined(H_SUPPORTED)
+        TSBI_CSR_INSTR_TABLE(0x6C0) // henvmtagexclude0
+        TSBI_CSR_INSTR_TABLE(0x6C1) // henvmtagexclude1
+        #endif
+        #if defined(SVATAG_SUPPORTED) && defined(H_SUPPORTED)
+        TSBI_CSR_INSTR_TABLE(0x6C2) // vsvitts
+        TSBI_CSR_INSTR_TABLE(0x6C3) // vsvittu
+        #endif
         #if defined(SSCOFPMF_SUPPORTED) && (UDB_MXLEN==32)
         TSBI_CSR_INSTR_TABLE(0x723) // mhpmevent3h
         TSBI_CSR_INSTR_TABLE(0x724) // mhpmevent4h
@@ -2196,6 +2213,17 @@ tsbi_csr_mstatus:                                 // dispatcher fast path
         TSBI_CSR_INSTR_TABLE(0x7A5) // tcontrol
         TSBI_CSR_INSTR_TABLE(0x7A8) // mcontext
         TSBI_CSR_INSTR_TABLE(0x7AA) // mscontext
+        #endif
+        #ifdef ZIMT_SUPPORTED
+        TSBI_CSR_INSTR_TABLE(0x7C0) // mmtagexclude0
+        TSBI_CSR_INSTR_TABLE(0x7C1) // mmtagexclude1
+        #ifdef S_SUPPORTED
+        TSBI_CSR_INSTR_TABLE(0x7C2) // menvmtagexclude0
+        TSBI_CSR_INSTR_TABLE(0x7C3) // menvmtagexclude1
+        #endif
+        #endif
+        #ifdef SMVATAG_SUPPORTED
+        TSBI_CSR_INSTR_TABLE(0x7C4) // mvitt
         #endif
         //TSBI_CSR_INSTR_TABLE(0xB00) // mcycle - shouldn't be changed below M-mode
         //TSBI_CSR_INSTR_TABLE(0xB02) // minstret - shouldn't be changed below M-mode

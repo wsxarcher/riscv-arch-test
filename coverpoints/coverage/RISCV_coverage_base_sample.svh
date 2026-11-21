@@ -121,6 +121,9 @@
     `ifdef COVER_SMSTATEEN
         smstateen_sample(hart, issue, ins);
     `endif
+    `ifdef COVER_SMVATAG
+        smvatag_sample(hart, issue, ins);
+    `endif
     `ifdef COVER_SSCCPTR
         ssccptr_sample(hart, issue, ins);
     `endif
@@ -162,6 +165,9 @@
     `endif
     `ifdef COVER_SVADU
         svadu_sample(hart, issue, ins);
+    `endif
+    `ifdef COVER_SVATAG
+        svatag_sample(hart, issue, ins);
     `endif
     `ifdef COVER_SVBARE
         svbare_sample(hart, issue, ins);
@@ -348,6 +354,9 @@
     `endif
     `ifdef COVER_ZIMOP
         zimop_sample(hart, issue, ins);
+    `endif
+    `ifdef COVER_ZIMT
+        zimt_sample(hart, issue, ins);
     `endif
     `ifdef COVER_ZKND
         zknd_sample(hart, issue, ins);

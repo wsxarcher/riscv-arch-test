@@ -29,9 +29,16 @@
 #endif
 
 // MSECCFG_SUPPORTED: the mseccfg / mseccfgh CSRs exist when at least one of
-// Zkr, Smmpm, Zicfilp, or Smepmp are implemented.
-#if defined(ZKR_SUPPORTED) || defined(SMMPM_SUPPORTED) || defined(ZICFILP_SUPPORTED) || defined(SMEPMP_SUPPORTED)
+// Zkr, Smmpm, Zicfilp, Smepmp, or Zimt are implemented.
+#if defined(ZKR_SUPPORTED) || defined(SMMPM_SUPPORTED) || defined(ZICFILP_SUPPORTED) || defined(SMEPMP_SUPPORTED) || \
+    defined(ZIMT_SUPPORTED)
   #define MSECCFG_SUPPORTED
+#endif
+
+// ZIMT_MT_MODE_11_RESERVED: Zimt without 7-bit pointer tags, where a write of MT_MODE = 0b11 leaves an
+// implementation-defined legal value.
+#if defined(ZIMT_SUPPORTED) && !defined(UDB_ZIMT_POINTER_TAG_WIDTH_7)
+  #define ZIMT_MT_MODE_11_RESERVED
 #endif
 
 // Cumulative privileged ISA version defines

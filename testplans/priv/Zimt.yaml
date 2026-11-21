@@ -1,0 +1,370 @@
+# yaml-language-server: $schema=testplan.schema.json
+suite: Zimt
+source: https://github.com/riscv/riscv-memory-tagging/blob/main/modules/ROOT/pages/mte_tag.adoc
+notes: |
+  covergroups Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg and Zimt_H_cg
+  Zimt_Sm boots to M-mode, Zimt_S to S-mode and Zimt_U to U-mode. Zimt_H boots to HS-mode and runs its tests in VS-mode and VU-mode.
+  Each group has five tests: <group> with memory tagging disabled, <group>_csr for the CSRs, <group>_mt for gentag and addtag with memory tagging enabled, <group>_settag for settag with memory tagging enabled, and <group>_checktag for checktag and the implicit tag checks of loads and stores with memory tagging enabled. Zimt_U_mt, Zimt_U_settag and Zimt_U_checktag need S-mode, where senvcfg, senvmtagexclude and svittu are.
+  The settag and checktag tests need the tag table CSR and pointer masking of their modes, which ignores the pointer tags in the address: Zimt_Sm_settag and Zimt_Sm_checktag Smvatag (mvitt) and Smmpm, Zimt_S_settag and Zimt_S_checktag Svatag (svitts), Smnpm and Sv39, Zimt_U_settag and Zimt_U_checktag Svatag (svittu) and Ssnpm, Zimt_H_settag and Zimt_H_checktag Svatag (vsvitts, vsvittu) and Ssnpm. They use PMLEN 7 if supported, else 16. The M-mode MPRV cases of Zimt_Sm_settag and Zimt_Sm_checktag also need S-mode, Smnpm and Svatag, and the guest translation cases of Zimt_H_settag and Zimt_H_checktag Sv39.
+  Store/AMO access faults come from RVMODEL_ACCESS_FAULT_ADDRESS_STORE (which defaults to RVMODEL_ACCESS_FAULT_ADDRESS), and load access faults and a page-table walk that faults from RVMODEL_ACCESS_FAULT_ADDRESS_LOAD: the cases and bins that need them exist only if the DUT defines them. The tags of those cases start 3 bytes into the faulting region, which is at least 128 bytes.
+  Memory tagging is disabled when xMT_MODE = 00, the reset value: mseccfg.MT_MODE (M), menvcfg.MT_MODE (S), henvcfg.MT_MODE (VS) or senvcfg.MT_MODE (U, VU). It is enabled with 4-bit tags (bits 63:60) by 10 and with 7-bit tags (bits 63:57) by 11.
+  4-bit tags are mandatory and 7-bit tags optional. A configuration that supports 7-bit tags sets ZIMT_POINTER_TAG_WIDTH_7 in the experimental_params of test_config.yaml, which defines UDB_ZIMT_POINTER_TAG_WIDTH_7: the cases and bins that need 7-bit tags exist only then. Without 7-bit tags, MT_MODE = 11 is reserved, and the exclusion mask bits of the tags 16-127 may be hardwired to zero, so a read of 0 there counts as the value written.
+  The exclusion mask CSRs are named mmtagexclude (M), menvmtagexclude (S/HS), henvmtagexclude (VS) and senvmtagexclude (U, VU), with the tags 0-63 in the low CSR (0) and 64-127 in the high one (1). Their addresses are the Sail model's placeholders (rvtest_experimental.h).
+  With memory tagging enabled and Bare address translation in the effective privilege mode (MPRV applies), a hart with tag tables (Svatag, Smvatag) checks the tags of the scalar loads and stores of data (integer, floating-point and compressed ones; not LR/SC, AMOs, CMOs, HLV/HSV or vector ones) that do not use sp (x2) as the base register: a mismatch raises a software-check exception, xtval = 4, before the access, and a fault of a tag load a load access fault at the tag. With address translation, whose pages without PTE.MTAG are not tag checked, they are not checked. So the tests enable memory tagging only around code whose other loads and stores, such as the signature's, use sp, and trap handlers run in modes where memory tagging stays disabled or with translation. The M-mode trap handler runs with M-mode's memory tagging, so the checktag tests raise no exception with memory tagging enabled in M-mode.
+  With 8-bit memory tags (7-bit pointer tags) the tag of chunk c is the byte at xVITT + c; with 4-bit tags it is the lower (c even) or upper (c odd) half of the byte at xVITT + c / 2, so settag reads, modifies and writes the bytes it shares with other chunks. Before each settag, a pattern whose bytes and halves differ from the tag surrounds the tags.
+  settag never raises a misaligned exception in these tests, as in the Sail model. The specification says both that tag accesses "must not raise misaligned exception" (mte_tag.adoc, introduction) and that "If implementation doesn't support misaligned accesses, settag instruction can raise misaligned exception" (settag exceptions). Whether a settag that faults stores the tags before the fault is implementation-defined, since settag may split its tag store into parts with no ordering among them: those tags hold the settag tag already.
+  The implicit tag check tests use a data page whose chunks have their tags in the tag table, through the tag table base of the mode. A misaligned load or store, which a hart may perform in parts, checks the tags of all the chunks it overlaps before any part of it.
+  A swept register that the framework uses is saved and restored around the instruction.
+coverpoints:
+  - heading: Zimt instructions with memory tagging disabled (every group)
+  - name: cp_gentag_mt_disabled
+    goal: gentag falls back to Zimop
+    description: gentag rd (MOP.RR.1, bit 24 = 0, imm4 = 0, rs1 = x0) for each rd != x0, then record rd.
+    expectation: rd = 0. No exception.
+    bins: 31 rd
+  - name: cp_addtag_mt_disabled_imm
+    goal: addtag copies rs1 to rd
+    description: addtag rd, rs1, imm4 (MOP.RR.1, bit 24 = 0) for each imm4 != 0, with rs1 holding a tagged pointer, then record rd.
+    expectation: rd = rs1. No exception. Without Zimt, rd = 0.
+    bins: 15 imm4
+  - name: cp_addtag_mt_disabled_rd
+    goal: addtag copies rs1 to rd
+    description: addtag rd, rs1, imm4 for each rd != x0, then record rd.
+    expectation: rd = rs1. No exception.
+    bins: 31 rd
+  - name: cp_addtag_mt_disabled_rs1
+    goal: addtag copies rs1 to rd
+    description: addtag rd, rs1, imm4 for each rs1, then record rd.
+    expectation: rd = rs1, so rd = 0 for rs1 = x0. No exception.
+    bins: 32 rs1
+  - name: cp_addtag_mt_disabled_rd_rs1
+    goal: addtag with rd = rs1
+    description: addtag rd, rd, 15, then record rd.
+    expectation: rd keeps its value. No exception.
+    bins: "1"
+  - name: cp_checktag_mt_disabled_imm
+    goal: checktag falls back to Zimop
+    description: checktag rs1, imm4 (MOP.RR.1, bit 24 = 0, rd = x0, rs1 != x0) for each imm4, with rs1 holding a tagged pointer.
+    expectation: No tag load and no exception.
+    bins: 16 imm4
+  - name: cp_checktag_mt_disabled_rs1
+    goal: checktag falls back to Zimop
+    description: checktag rs1, imm4 for each rs1 != x0.
+    expectation: No tag load and no exception.
+    bins: 31 rs1
+  - name: cp_settag_mt_disabled_imm
+    goal: settag falls back to Zimop
+    description: settag rs1, imm4 (MOP.RR.0, bit 24 = 0, rd = x0, rs1 != x0) for each imm4, with rs1 holding a tagged pointer.
+    expectation: No tag store and no exception.
+    bins: 16 imm4
+  - name: cp_settag_mt_disabled_rs1
+    goal: settag falls back to Zimop
+    description: settag rs1, imm4 for each rs1 != x0.
+    expectation: No tag store and no exception.
+    bins: 31 rs1
+  - heading: MOP.RR encodings that are not Zimt instructions
+  - name: cp_mop_rr_not_zimt
+    goal: Encodings that miss one condition of a Zimt instruction stay Zimop instructions
+    description: |-
+      MOP.RR.1 with rd != x0 and bit 24 = 1, for each imm4 (neither gentag nor addtag).
+      MOP.RR.1 with rd != x0, rs1 != x0, bit 24 = 0 and imm4 = 0 (neither gentag nor addtag).
+      MOP.RR.1 with rd = x0, rs1 != x0 and bit 24 = 1 (not checktag).
+      MOP.RR.1 with rd = rs1 = x0 (not checktag).
+      MOP.RR.0 with rd != x0 (not settag).
+      MOP.RR.0 with rd = x0, rs1 != x0 and bit 24 = 1 (not settag).
+      MOP.RR.0 with rd = rs1 = x0 (not settag).
+      Record rd when it is not x0. Memory tagging disabled.
+    expectation: rd = 0. No exception.
+    bins: 16 + 6 = 22 encodings
+  - heading: MT_MODE fields
+  - name: cp_mt_mode_warl
+    goal: MT_MODE is WARL, 01 is reserved, and 11 shows 7-bit tag support
+    description: |-
+      Write each MT_MODE encoding over 00, 10 and, with 7-bit tags, 11, with one csrw that keeps the other bits, then record MT_MODE (bits 35:34): mseccfg and menvcfg (with U-mode) in M-mode (Zimt_Sm), senvcfg in S-mode (Zimt_S), henvcfg in HS-mode (Zimt_H).
+      After writing the reserved 01, or 11 without 7-bit tags, whose legalization is implementation-defined, record whether MT_MODE holds a legal value instead: not 01, and without 7-bit tags not 11 either.
+    expectation: MT_MODE reads the value written. After 01, and after 11 without 7-bit tags, 1.
+    bins: M 2 CSRs x 3 x 4, S 3 x 4, HS 3 x 4 (2 x 4 instead of 3 x 4 without 7-bit tags)
+  - name: cp_vumt_mode_warl
+    goal: hstatus.VUMT_MODE is WARL like MT_MODE
+    description: In HS-mode, write each VUMT_MODE (hstatus bits 51:50) encoding over 00, 10 and, with 7-bit tags, 11, with one csrw that keeps the other bits, then record it as for MT_MODE.
+    expectation: VUMT_MODE reads the value written. After 01, and after 11 without 7-bit tags, 1.
+    bins: 3 x 4 (2 x 4 without 7-bit tags)
+  - heading: Tag generation exclusion mask CSRs
+  - name: cp_mtagexclude_reset
+    goal: The exclusion mask CSRs reset to 0
+    description: In M-mode, read each of the 8 exclusion mask CSRs that exists before any write (menvmtagexclude and senvmtagexclude need S, henvmtagexclude needs H).
+    expectation: "0"
+    bins: 8 CSRs (2 without S, 6 without H)
+  - name: cp_mtagexclude0_warl
+    goal: A low exclusion mask CSR must permit one of the tags 0-15
+    description: |-
+      Write values to the low CSR and record it: mmtagexclude0 and menvmtagexclude0 (with S-mode) in M-mode, senvmtagexclude0 in S-mode, henvmtagexclude0 in HS-mode.
+      A value excluding all of the tags 0-15 (bits 15:0 all ones) is illegal, and which bits the CSR then leaves clear is implementation-defined: record whether one of 0-15 is permitted instead.
+    expectation: The value written (without 7-bit tags, bits 63:16 may read 0); for an illegal value, 1.
+    bins: M 2 CSRs x 2 (legal, all of 0-15 excluded), S 2, HS 2
+  - name: cp_mtagexclude1_write
+    goal: A high exclusion mask CSR is fully writable with 7-bit tags
+    description: Write zero and nonzero values to the high CSR and read them back, as for cp_mtagexclude0_warl.
+    expectation: The value written (without 7-bit tags, it may read 0).
+    bins: M 2 CSRs x 2 (zero, nonzero), S 2, HS 2
+  - name: cp_csr_access
+    goal: The exclusion mask CSRs follow the CSR privilege rules
+    description: |-
+      In S, U, VS and VU modes, read each of the 8 exclusion mask CSRs, write it with csrrw, and read it again.
+      T-SBI calls, which access the CSRs from M-mode or HS-mode, write a value to each CSR that exists first and read it after the write: a write that raised an exception leaves that value.
+      The values in the low CSRs are below bit 16 and those in the high CSRs 0, which every hart keeps; the high CSRs are written with values above bit 15, which a hart without 7-bit tags may read as 0.
+      In VS-mode, senvmtagexclude is the CSR itself: it has no VS-mode copy.
+    expectation: |-
+      S-mode: mmtagexclude and menvmtagexclude raise an illegal-instruction exception; the others are accessible (henvmtagexclude in HS-mode).
+      U-mode: every access raises an illegal-instruction exception.
+      VS-mode: senvmtagexclude is accessible; henvmtagexclude raises a virtual-instruction exception; mmtagexclude and menvmtagexclude raise an illegal-instruction exception.
+      VU-mode: senvmtagexclude and henvmtagexclude raise a virtual-instruction exception; mmtagexclude and menvmtagexclude raise an illegal-instruction exception.
+    bins: S, U, VS, VU x 2 (read, write) x 8 CSRs
+  - heading: Software-check exception (cause 18)
+  - name: cp_swcheck_deleg
+    goal: A software-check exception can be delegated
+    description: Set and clear bit 18 of medeleg in M-mode (Zimt_Sm, with S-mode) and of hedeleg in HS-mode (Zimt_H), recording the bit.
+    expectation: 1, then 0.
+    bins: medeleg 2 (csrrs, csrrc), hedeleg 2
+  - name: cp_swcheck_cause
+    goal: The cause CSRs hold the software-check exception code
+    description: Write 18 to mcause (M-mode), scause (S-mode) and vscause (HS-mode) and read it back.
+    expectation: "18"
+    bins: 3 CSRs
+  - heading: gentag and addtag with memory tagging enabled (Zimt_Sm)
+  - name: cp_gentag_mt_tag4_tag
+    goal: gentag generates only a permitted tag (4-bit tags)
+    description: |-
+      With mseccfg.MT_MODE = 10, let mmtagexclude permit only one of the tags 0-15, for each of them, then gentag and record rd.
+      Once with the mask bits of the tags 16-127 set and once with them clear, as gentag ignores them with 4-bit tags. Only with 7-bit tags must a hart keep those bits.
+    expectation: rd = tag << 60.
+    bins: 16 tags x 2 (mask bits of the tags 16-127 clear, not clear); 16 tags without 7-bit tags
+  - name: cp_gentag_mt_tag7_tag
+    goal: gentag generates only a permitted tag (7-bit tags; this and the other tag7 coverpoints exist only with them)
+    description: With mseccfg.MT_MODE = 11, let mmtagexclude permit only one of the tags 0-15, for each of them, then gentag and record rd.
+    expectation: rd = tag << 57.
+    bins: 16 tags
+  - name: cp_gentag_mt_tag7_high
+    goal: gentag draws the tags above 15 (7-bit tags)
+    description: |-
+      With mseccfg.MT_MODE = 11, let mmtagexclude permit only 0 and a tag above 15, the first and last of each group of 16 tags, and draw up to 128 times until that tag comes.
+      Record whether it came, with only 0 before it. Drawing uniformly, a hart misses it with probability 2^-128.
+    expectation: "1"
+    bins: 14 tags
+  - name: cp_gentag_mt_several
+    goal: gentag draws only permitted tags from masks permitting several
+    description: Draw 32 tags with masks permitting the odd 4-bit tags, the even 7-bit tags, and the 7-bit tags 0-15 and 121-127, and record whether each draw was a permitted tag with the bits below it 0. The bins need masks permitting more than two tags, unlike the ones of cp_gentag_mt_tag7_high.
+    expectation: "1"
+    bins: 2 (4-bit, 7-bit tags); 1 without 7-bit tags
+  - name: |-
+      cp_gentag_mt_tag4
+      cp_gentag_mt_tag7
+    goal: gentag writes the generated tag to each rd
+    description: With mmtagexclude permitting only tag 9, gentag rd for each rd != x0, then record rd.
+    expectation: rd = 9 << 60 (4-bit tags) or 9 << 57 (7-bit tags).
+    bins: 2 x 31 rd
+  - name: |-
+      cp_addtag_mt_tag4_imm
+      cp_addtag_mt_tag7_imm
+    goal: addtag adds imm4 to the pointer tag, which wraps
+    description: addtag rd, rs1, imm4 for each imm4 != 0, from tag 5 (4-bit tags) or 120 (7-bit tags), then record rd. The exclusion mask permits only tag 9, which does not affect addtag.
+    expectation: rd = rs1 with its tag replaced by (tag + imm4) mod 2^pointer_tag_width; the bits below the tag are kept.
+    bins: 2 x 15 imm4
+  - name: |-
+      cp_addtag_mt_tag4_rd
+      cp_addtag_mt_tag7_rd
+      cp_addtag_mt_tag4_rs1
+      cp_addtag_mt_tag7_rs1
+      cp_addtag_mt_tag4_rd_rs1
+      cp_addtag_mt_tag7_rd_rs1
+    goal: addtag with each rd and rs1
+    description: addtag rd, rs1, imm4 for each rd != x0, for each rs1, and with rd = rs1, then record rd.
+    expectation: As for cp_addtag_mt_tag4_imm; rd = imm4 << 60 or imm4 << 57 for rs1 = x0.
+    bins: 2 x (31 rd + 32 rs1 + 1)
+  - name: |-
+      cp_mop_rr_not_zimt_mt_tag4
+      cp_mop_rr_not_zimt_mt_tag7
+    goal: Encodings that miss one condition of a Zimt instruction stay Zimop instructions with memory tagging enabled
+    description: The cp_mop_rr_not_zimt encodings with mseccfg.MT_MODE = 10 and 11.
+    expectation: rd = 0. No exception.
+    bins: 2 x 22 encodings
+  - heading: gentag and addtag with memory tagging enabled in each mode
+  - name: |-
+      cp_gentag_mt_enabled
+      cp_addtag_mt_enabled
+    goal: Each mode uses its own MT_MODE field and exclusion mask
+    description: |-
+      Enable memory tagging with 4-bit and, if supported, with 7-bit tags, and let the exclusion mask permit only one tag, in each mode: S (menvcfg, menvmtagexclude, set from M-mode), U (senvcfg, senvmtagexclude, set from S-mode, so only with S-mode), VS (henvcfg, henvmtagexclude) and VU (senvcfg, senvmtagexclude, both set from HS-mode).
+      The other modes' MT_MODE fields and masks hold other values, except where a trap handler runs: a field that another mode uses holds 00 while the mode under test uses 4-bit tags, and 10 while it uses 7-bit tags. In the mode, gentag, then addtag from the largest tag plus 1 and from tag 3 plus 5; record rd.
+      cp_addtag_mt_enabled also crosses the Zimt_Sm addtag tests with wrapping (M-mode: mseccfg, mmtagexclude).
+    expectation: rd = the permitted tag shifted to bits 63:60 or 63:57; addtag wraps the tag to 0, or gives 8.
+    bins: S, U, VS, VU x 2 widths x (gentag, addtag with and without wrapping); M x 2 widths x (addtag with and without wrapping); 1 width without 7-bit tags
+  - heading: settag with memory tagging enabled
+  - name: |-
+      cp_settag_mt_tag4_chunks
+      cp_settag_mt_tag7_chunks
+    goal: settag stores the pointer tag of rs1 in the tags of chunk_count + 1 consecutive chunks (Zimt_Sm_settag)
+    description: |-
+      In M-mode, with mvitt = the tag table and mseccfg.PMM set, settag rs1, chunk_count for each chunk_count, from each first chunk whose tag is at another place in a doubleword: with 4-bit tags (mseccfg.MT_MODE = 10) each half of each byte (rs1 bits 7:4), with 7-bit tags (11) each byte (rs1 bits 6:4).
+      rs1 holds the tag 0xa (4-bit) or 0x5a (7-bit), and nonzero bits 3:0, which settag ignores. After each settag, record the doublewords of the tags and one on each side.
+    expectation: The tags of the chunk_count + 1 chunks from the chunk of rs1 hold the tag; the other bytes and halves keep the pattern. No exception.
+    bins: 16 first chunks x 16 chunk_count (4-bit tags) + 8 first chunks x 16 chunk_count (7-bit tags)
+  - name: cp_settag_mt_tag4_rs1
+    goal: settag with each rs1
+    description: In M-mode with 4-bit tags, settag x<r>, 0 for each r != x0, with x<r> tagged with r % 16 and pointing to a chunk of its own; then record the tag table around the tags.
+    expectation: The tag of the chunk of x<r> is r % 16. No exception.
+    bins: 31 rs1
+  - name: cp_settag_mt_enabled
+    goal: settag uses the tag table, MT_MODE and PMM of the mode, and raises store/AMO faults at the tag address
+    description: |-
+      S-mode (Zimt_S_settag): with Sv39 translation, svitts = a virtual address that maps to the tag table, and menvcfg.MT_MODE and menvcfg.PMM set. settags whose tags cross from that page into a second one that is valid, invalid, read-only, clean (D = 0), or (with Svpbmt) IO or NC memory; one whose tags start 3 bytes into the faulting region of RVMODEL_ACCESS_FAULT_ADDRESS_STORE, in a page that maps to it; one whose page-table walk reads a level-0 table in the faulting region of RVMODEL_ACCESS_FAULT_ADDRESS_LOAD; and one with svitts at a non-canonical address (bit 46 set). The NC page is a third tag table page that only that mapping accesses, so no cacheable access aliases it. Record the doublewords around the page boundary.
+      U-mode (Zimt_U_settag): svittu = the tag table, and senvcfg.MT_MODE and senvcfg.PMM set, from S-mode, which keeps memory tagging disabled. settags of 1, 16 and 6 chunks, then one whose tags start 3 bytes into the faulting region of RVMODEL_ACCESS_FAULT_ADDRESS_STORE, with svittu = its page.
+      VS-mode and VU-mode (Zimt_H_settag): vsvitts = the first tag table page and vsvittu = the second, svitts = svittu = 0, and henvcfg.MT_MODE and henvcfg.PMM (VS) or senvcfg.MT_MODE and senvcfg.PMM (VU) set. The settags of U-mode without the fault; then HS-mode records both pages.
+      Each with 4-bit and 7-bit tags. With 4-bit tags, the faulting settags start in an upper half and the crossing ones end in a lower half, so they read and write bytes they share with other chunks.
+    expectation: |-
+      The tags go to the tag table of the mode; the other bytes and halves keep the pattern.
+      A tag in an invalid or read-only page, or at a non-canonical address: store/AMO page fault (cause 15); in a clean page, a store/AMO page fault with Svade, and none with Svadu, which sets D. In IO memory, which is not idempotent, in a faulting region, or behind a page-table walk that reads a faulting region: store/AMO access fault (cause 7). In NC memory, which is idempotent, no exception. xtval = the address of the first tag byte that faults, and the faulting tag bytes keep their value.
+    bins: S 2 widths x 3 (no exception, store/AMO access fault, store/AMO page fault; no access fault without Svpbmt and the fault addresses); U 2 widths x 2 (no exception, store/AMO access fault; no access fault without RVMODEL_ACCESS_FAULT_ADDRESS_STORE); VS, VU x 2 widths; 1 width without 7-bit tags
+  - name: cp_settag_addr_msb
+    goal: settag uses the masked address of rs1, sign-extended with address translation and zero-extended without
+    description: |-
+      M-mode (Zimt_Sm_settag), without translation: settag of 16 chunks through a pointer with bit 56 (PMLEN 7) or bit 47 (PMLEN 16) set, which pointer masking zero-extends, and mvitt = the tag table minus the tag offset of that bit, so the tags land in the tag table.
+      S-mode (Zimt_S_settag), with Sv39: the settag of the valid crossing case through a pointer with bits 56 and 47 set, which pointer masking sign-extends, and svitts wrapped around by the tag offset of the sign-extended bits. Record the tags as for the other cases.
+      Each with 4-bit and 7-bit tags.
+    expectation: The same tags as through a pointer without those bits. A hart that extends the other way stores its tags far from the tag table, where they fault.
+    bins: M, S x 2 widths; 1 width without 7-bit tags
+  - name: cp_settag_mprv
+    goal: With MPRV, settag uses the tag table and MT_MODE of the current privilege, and the pointer masking and translation of the effective one
+    description: |-
+      In M-mode with mstatus.MPRV = 1 and MPP = S (Zimt_Sm_settag; needs S-mode, Smnpm and Svatag): mvitt = the first tag table page and mseccfg.MT_MODE set; menvcfg.PMM set and mseccfg.PMM = 00, satp = Bare; svitts = the second page and menvcfg.MT_MODE = 00. settag of 10 chunks, then record both pages around the tags.
+      Each with 4-bit and 7-bit tags.
+    expectation: The tags go to the first page, with the pointer tag masked; the second page keeps the pattern. No exception.
+    bins: 2 widths; 1 width without 7-bit tags
+  - name: |-
+      cp_settag_two_stage
+      cp_settag_g_stage
+    goal: settag translates its tag addresses with the guest translation of VS-mode, and its G-stage faults are store/AMO guest-page faults
+    description: |-
+      In VS-mode (Zimt_H_settag; needs Sv39), with two-stage translation (vsatp = Sv39, hgatp = Sv39x4): vsvitts = a VS-stage page that maps to a guest physical page, which the G stage maps to the second tag table page. The VS-stage leaf is valid or read-only, and the G-stage leaf valid, read-only or invalid. With the G stage only (vsatp = Bare): vsvitts = a guest physical page that the G stage maps to the second tag table page, valid or read-only, or vsvitts = 2^41, above the guest physical addresses of Sv39x4.
+      settag of 2 chunks; HS-mode takes the traps and records the second tag table page around the tags. Each with 4-bit and 7-bit tags.
+    expectation: |-
+      The tags go to the second tag table page through both stages.
+      A read-only VS-stage leaf: store/AMO page fault (cause 15), htval = 0. A read-only or invalid G-stage leaf, or a guest physical address above 2^41: store/AMO guest-page fault (cause 23), htval = the guest physical address >> 2. xtval = the address of the first tag byte, hstatus.GVA = 1, and the tags keep their value.
+    bins: two-stage 2 widths x 3 (no exception, store/AMO page fault, store/AMO guest-page fault); G stage only 2 widths x 2 (no exception, store/AMO guest-page fault); 1 width without 7-bit tags
+  - heading: checktag and the implicit tag checks of loads and stores with memory tagging enabled
+  - name: |-
+      cp_checktag_mt_tag4_chunks
+      cp_checktag_mt_tag7_chunks
+    goal: checktag compares the tags of chunk_count + 1 consecutive chunks, and only those (Zimt_Sm_checktag)
+    description: |-
+      In M-mode, with mvitt putting the tags of a data page in the tag table and mseccfg.PMM set, checktag rs1, chunk_count for each chunk_count, from each first chunk whose tag is at another place in a doubleword: with 4-bit tags each half of each byte (rs1 bits 7:4), with 7-bit tags each byte (rs1 bits 6:4). The tags of those chunks match the pointer tag of rs1, and those of the chunks right before and after them do not.
+    expectation: No exception. A hart that checks a chunk outside the range raises a software-check exception, which the M-mode trap handler cannot take with memory tagging enabled.
+    bins: 16 first chunks x 16 chunk_count (4-bit tags) + 8 first chunks x 16 chunk_count (7-bit tags)
+  - name: cp_checktag_mt_enabled
+    goal: checktag compares the pointer tag of rs1 with the memory tags of its chunks, in the tag table of the mode, and raises load faults at the tag address
+    description: |-
+      S-mode (Zimt_S_checktag): with Sv39 translation and svitts as for Zimt_S_settag, checktags whose tags cross from the first tag table page into a second one that is valid with matching or mismatching tags, invalid, execute-only, not accessed (A = 0), or (with Svpbmt) IO or NC memory; one whose tags start 3 bytes into the faulting region of RVMODEL_ACCESS_FAULT_ADDRESS_LOAD; one whose page-table walk reads a level-0 table there; and one with svitts at a non-canonical address. The IO and NC pages map a third tag table page, which no cacheable access aliases.
+      U-mode (Zimt_U_checktag), VS-mode and VU-mode (Zimt_H_checktag), with Bare translation: the data chunks 20 and 23 have a mismatching tag. checktags of chunks 16-19, 17-20, 20, 21-22, 21-23, 5-20 and 24-39, and of chunk 0 with a mismatching pointer tag; with 7-bit tags, of chunk 4 while its memory tag has bit 7 set, with the pointer tag of its other bits; then one with the tag table base in the faulting region of RVMODEL_ACCESS_FAULT_ADDRESS_LOAD.
+      S-mode with Bare translation (Zimt_S_checktag, before Sv39): those whose chunks all match (16-19, 21-22 and 24-39). As in M-mode, no exception can be taken there with memory tagging enabled: the trap handlers would be tag checked, as the M-mode one reads the trapping instruction with mstatus.MPRV = 1 and MPP = S.
+      Each with 4-bit and 7-bit tags.
+    expectation: |-
+      No exception if all the tags match; a software-check exception (cause 18, xtval = 4) at the first mismatching chunk, also for a memory tag with bit 7 set, which matches no 7-bit pointer tag. A tag in an invalid, execute-only or not accessed page, or at a non-canonical address: load page fault (cause 13; none in a not accessed page with Svadu, which sets A). In a faulting region, or behind a page-table walk that reads one: load access fault (cause 5). xtval = the address of the first tag byte that faults. IO and NC memory are readable: no exception.
+    bins: S 2 widths x 4 (no exception, software check, load page fault, load access fault; no access fault without RVMODEL_ACCESS_FAULT_ADDRESS_LOAD); U, VS, VU x 2 widths x 3 (no exception, software check, load access fault); 1 width without 7-bit tags
+  - name: cp_checktag_addr_msb
+    goal: checktag uses the sign-extended masked address of rs1 with address translation
+    description: In S-mode (Zimt_S_checktag), the checktag of the valid crossing case through a pointer with bits 56 and 47 set, with svitts wrapped around by the tag offset of the sign-extended bits, as for cp_settag_addr_msb. Each with 4-bit and 7-bit tags.
+    expectation: No exception, as through a pointer without those bits.
+    bins: 2 widths; 1 width without 7-bit tags
+  - name: |-
+      cp_checktag_mprv
+      cp_checktag_mprv_m_pmm
+    goal: With MPRV, checktag uses the MT_MODE and tag table of the current privilege, and the address translation (with its pointer masking) of the effective one
+    description: In M-mode with mstatus.MPRV = 1 and MPP = S (Zimt_Sm_checktag), menvcfg.MT_MODE set and mseccfg.MT_MODE = 00, checktag through a pointer with a mismatching tag; then with mseccfg.MT_MODE set and menvcfg.MT_MODE = 00, and mseccfg.PMM = 00 while menvcfg.PMM is set, checktag of chunks with the matching tags in the mvitt tag table. Each with 4-bit and 7-bit tags.
+    expectation: No exception for both. checktag does nothing with M-mode's memory tagging disabled, whatever S-mode's, and masks the pointer with S-mode's pointer masking.
+    bins: 2 widths x (S-mode's memory tagging only, M-mode's only); 2 widths with mseccfg.PMM = 00 (cp_checktag_mprv_m_pmm); 1 width without 7-bit tags
+  - name: |-
+      cp_checktag_two_stage
+      cp_checktag_g_stage
+    goal: checktag translates its tag addresses with the guest translation of VS-mode, and its G-stage faults are load guest-page faults
+    description: |-
+      In VS-mode (Zimt_H_checktag; needs Sv39), the cases of cp_settag_two_stage and cp_settag_g_stage with checktag of 2 chunks, with execute-only instead of read-only leaves, and a two-stage case with mismatching tags. HS-mode fills the tags and takes the traps. Each with 4-bit and 7-bit tags.
+    expectation: |-
+      No exception through both stages with matching tags; a software-check exception with mismatching ones.
+      An execute-only VS-stage leaf: load page fault (cause 13), htval = 0. An execute-only or invalid G-stage leaf, or a guest physical address above 2^41: load guest-page fault (cause 21), htval = the guest physical address >> 2. xtval = the address of the first tag byte, hstatus.GVA = 1.
+    bins: two-stage 2 widths x 4 (no exception, software check, load page fault, load guest-page fault); G stage only 2 widths x 2 (no exception, load guest-page fault); 1 width without 7-bit tags
+  - name: cp_checked_access
+    goal: Each kind of load and store is tag checked against the memory tag of its chunk
+    description: |-
+      Each of lb, lbu, lh, lhu, lw, lwu, ld, sb, sh, sw, sd, c.lw, c.ld, c.sw, c.sd, c.lbu, c.lh, c.lhu, c.sb, c.sh (Zcb) and, with their extensions and outside VS-mode and VU-mode, flh, flw, fld, fsh, fsw, fsd, c.fld, c.fsd, on a data chunk of its own, with the matching pointer tag, then (except in M-mode) with a mismatching one. A load records rd, which holds a canary before; a store records the doubleword through sp. With 7-bit tags (except in M-mode), a load of a chunk whose memory tag has bit 7 set, with the pointer tag of its other bits.
+      M-mode (Zimt_Sm_checktag) with mseccfg.MT_MODE set around each access; S-mode with Bare translation (Zimt_S_checktag) with menvcfg.MT_MODE, which as M-mode tests only the matching pointer tags; U-mode (Zimt_U_checktag) with senvcfg.MT_MODE; VS-mode and VU-mode (Zimt_H_checktag) with henvcfg.MT_MODE and senvcfg.MT_MODE. Each with 4-bit and 7-bit tags.
+    expectation: With the matching tag, the access is performed. With a mismatching one, a software-check exception (cause 18, xtval = 4, htval = 0, GVA = 0), rd and memory unchanged.
+    bins: M, S x 2 widths x 28 kinds; U 2 widths x 28 kinds x 2 outcomes; VS, VU x 2 widths x 20 kinds x 2 outcomes (fewer without the extensions; 1 width without 7-bit tags)
+  - name: cp_checked_two_chunks
+    goal: A misaligned load or store checks the tags of both chunks that it overlaps before any of its parts
+    description: |-
+      ld, lw, lh, sd, sw, sh and (outside VS-mode and VU-mode) fld and fsd over two chunks with matching tags; then (except in M-mode and S-mode) ld, lw, sh, sd and fsd over chunk 20 or 23, whose tag mismatches, as their first or second chunk. Each with 4-bit and 7-bit tags. In M-mode and S-mode only with hardware misaligned loads and stores (UDB_MISALIGNED_LDST): otherwise they trap, and the trap handlers would be tag checked.
+    expectation: Performed with matching tags; without hardware misaligned loads and stores, the address-misaligned or access-fault exception of the access, after its tag check. A software-check exception with either chunk mismatching, with no byte of the access performed.
+    bins: M, S (Bare) x 2 widths x (load, store) (with UDB_MISALIGNED_LDST); U, VS, VU x 2 widths x (load, store) x 2 outcomes; 1 width without 7-bit tags
+  - name: |-
+      cp_checked_sp
+      cp_checked_sp_compressed
+    goal: Loads and stores with sp as the base register are not tag checked
+    description: ld and sd through sp holding a pointer with a mismatching tag, then with Zca c.ldsp, c.sdsp, c.lwsp and c.swsp and (with Zcd, outside VS-mode and VU-mode) c.fldsp and c.fsdsp, in M-mode, U-mode, S-mode (Bare), VS-mode and VU-mode with memory tagging enabled. Record the loaded values and the stored doublewords (through sp without a pointer tag, as the signature stores). Each with 4-bit and 7-bit tags.
+    expectation: All performed. No exception.
+    bins: M, U, S, VS, VU x 2 widths x (load, store), and x 4 or 6 compressed kinds; 1 width without 7-bit tags
+  - name: cp_checked_order
+    goal: Tag checks observe the older tag stores of the hart
+    description: |-
+      A store through sp to the tag of a data chunk, behind three divisions that delay its commit, right before a load, or a store, of the chunk with the stored tag; then (except in M-mode and S-mode) one that stores the old tag back right before the access with the new one. A settag of another chunk right before a load, or a store, of it with the new tag; then (except in M-mode and S-mode) one right before the access with the old tag. Record rd and the stored doubleword. M-mode, U-mode, S-mode (Bare), VS-mode and VU-mode, each with 4-bit and 7-bit tags.
+    expectation: The accesses with the newly stored tag raise no exception; those with the old one a software-check exception, and the stores leave memory unchanged.
+    bins: M, S x 2 widths x (load, store) x (after the tag store, after settag); U, VS, VU x 2 widths x (load, store) x (after the tag store, after settag) x 2 outcomes; 1 width without 7-bit tags
+  - name: cp_checked_fault
+    goal: The tag loads of the implicit checks raise load access faults, before the access faults of the data
+    description: |-
+      U-mode (Zimt_U_checktag), VS-mode and VU-mode (Zimt_H_checktag): with the tag table base in the faulting region of RVMODEL_ACCESS_FAULT_ADDRESS_LOAD, a load and a store whose tag is 3 bytes into it. U-mode: a load of the faulting region of RVMODEL_ACCESS_FAULT_ADDRESS_LOAD and a store to that of RVMODEL_ACCESS_FAULT_ADDRESS_STORE whose tags, in the tag table, match; then with a mismatching pointer tag. Each with 4-bit and 7-bit tags.
+    expectation: |-
+      A tag load that faults: load access fault (cause 5), also for a store, xtval = the address of the tag byte. A data access with matching tags: its access fault (cause 5 or 7), xtval = its address; with a mismatching pointer tag: a software-check exception, which comes first.
+    bins: U 2 widths x 3 (load access fault of a load, of a store, store/AMO access fault); VS, VU x 2 widths x 2 (load access fault of a load, of a store); 1 width without 7-bit tags
+  - name: |-
+      cp_checked_mprv
+      cp_checked_mprv_m_mt
+    goal: With MPRV, loads and stores are checked with the MT_MODE and tag table of the effective privilege
+    description: |-
+      In M-mode with mstatus.MPRV = 1 and MPP = S (Zimt_Sm_checktag; needs S-mode, Smnpm and Svatag), satp = Bare, menvcfg.MT_MODE and menvcfg.PMM set and svitts putting the tags of the data page in the tag table, while mseccfg.MT_MODE = 00: a load and a store with the matching pointer tag, and a load and a store with a mismatching one. Then with mseccfg.MT_MODE set and menvcfg.MT_MODE = 00, a load and a store with a mismatching pointer tag. Each with 4-bit and 7-bit tags.
+    expectation: The mismatching load and store with S-mode's memory tagging enabled raise a software-check exception, which M-mode takes; the other accesses raise none.
+    bins: 2 widths x (load, store) x 2 outcomes with S-mode's memory tagging; 2 widths x (load, store) with M-mode's (cp_checked_mprv_m_mt); 1 width without 7-bit tags
+  - name: cp_checked_translated
+    goal: Loads and stores are not tag checked with first-stage address translation (only pages with PTE.MTAG = 1, which is not allocated yet, are tagged-data pages then)
+    description: In S-mode with Sv39 (Zimt_S_checktag), and in VS-mode with two-stage translation (vsatp = Sv39, hgatp = Sv39x4) (Zimt_H_checktag), a load and a store of a tag table page through a pointer with a mismatching tag, whose own tags are not mapped. Each with 4-bit and 7-bit tags.
+    expectation: Both performed. No exception.
+    bins: S, VS x 2 widths x (load, store); 1 width without 7-bit tags
+  - name: cp_checked_g_stage
+    goal: With the G stage only (vsatp = Bare), all data pages are tagged-data pages (PTE.MTAG is a bit of first-stage page tables), so VS-mode loads and stores are tag checked, and the G stage translates their tag loads
+    description: |-
+      In VS-mode with hgatp = Sv39x4 and vsatp = Bare (Zimt_H_checktag; needs Sv39), with vsvitts putting the tags of the data chunks in the first tag table page, which the G stage maps with the test image: a load and a store of a data chunk with the matching pointer tag and with a mismatching one. Then, with vsvitts putting the tags in a guest physical page that the G stage maps execute-only: a load and a store with the matching pointer tag. HS-mode computes the pointers (the guest code runs at an alias), takes the traps and records the doubleword the stores write. Each with 4-bit and 7-bit tags.
+    expectation: |-
+      With the matching tag, the access is performed; with a mismatching one, a software-check exception (cause 18, stval = 4, htval = 0, hstatus.GVA = 0), rd and memory unchanged.
+      With the tags in the execute-only page, the tag load raises a load guest-page fault (cause 21), also for the store: stval = the address of the tag byte, htval = it >> 2 (vsatp = Bare), htinst = 0, hstatus.GVA = 1; the access is not performed.
+    bins: 2 widths x (load, store) x (no exception, software check, load guest-page fault); 1 width without 7-bit tags
+  - name: cp_checked_mprv_v
+    goal: With MPRV and MPV = 1, loads and stores are checked with the MT_MODE and tag table of VS-mode or VU-mode
+    description: |-
+      In M-mode with mstatus.MPRV = 1, MPV = 1 and Bare translation (vsatp, hgatp) (Zimt_Sm_checktag; needs H, Ssnpm and Svatag), with MPP = S and henvcfg.MT_MODE, henvcfg.PMM and vsvitts set, then with MPP = U and senvcfg.MT_MODE, senvcfg.PMM and vsvittu set, while mseccfg.MT_MODE = 00 and svitts = svittu = 0: a load and a store with the matching pointer tag, and with a mismatching one. Each with 4-bit and 7-bit tags.
+    expectation: The mismatching ones raise a software-check exception (cause 18, mtval = 4, GVA = 0), which M-mode takes; the others none.
+    bins: (VS, VU) x (load, store) x 2 outcomes
+  - name: cp_unchecked_access
+    goal: The accesses that are not regular data loads and stores are not tag checked
+    description: |-
+      With memory tagging enabled and a pointer tag that does not match: lr.d and sc.d (Zalrsc) and amoadd.d (Zaamo) through a pointer with a mismatching tag, in M-mode, U-mode, S-mode (Bare), VS-mode and VU-mode; in M-mode also cbo.clean and cbo.flush (Zicbom) and cbo.zero (Zicboz), and hsv.d and hlv.d (H) through a pointer without a tag, whose chunk has a tag; and (V) vse64.v, vsse64.v, vsuxei64.v, masked vse64.v with element 0 masked off, vle64.v, vlse64.v and vluxei64.v through a pointer with a mismatching tag. Record the loaded values and memory. Each with 4-bit and 7-bit tags.
+    expectation: No exception; all performed.
+    bins: M 2 widths x up to 15 kinds; U, S, VS, VU x 2 widths x (lr, sc, amo) (fewer without the extensions; 1 width without 7-bit tags)
+  - name: cp_checktag_sp
+    goal: checktag with sp as rs1 is tag checked, unlike the loads and stores with sp as the base register
+    description: checktag with sp as rs1 holding a pointer with the matching tag, then (except in M-mode and S-mode) with a mismatching one, in M-mode, U-mode, S-mode (Bare), VS-mode and VU-mode with memory tagging enabled. Each with 4-bit and 7-bit tags.
+    expectation: No exception with the matching tag; a software-check exception (cause 18, xtval = 4) with the mismatching one.
+    bins: M, S x 2 widths; U, VS, VU x 2 widths x 2 outcomes; 1 width without 7-bit tags
+  - name: cp_swcheck_to_vs
+    goal: hedeleg[18] delegates the software-check exceptions of VU-mode to VS-mode
+    description: In VU-mode with Bare translation and memory tagging enabled (Zimt_H_checktag), with hedeleg[18] = 1 and VS-mode's memory tagging disabled, checktag and a load through a pointer with a mismatching tag. Each with 4-bit and 7-bit tags.
+    expectation: Software-check exceptions that VS-mode takes (vscause = 18, vstval = 4).
+    bins: 2 widths x (checktag, load); 1 width without 7-bit tags

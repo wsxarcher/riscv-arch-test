@@ -157,14 +157,21 @@ def prepare_dut_outputs(configs: list[Config], workdir: Path, jobs: int, verbose
 
         # UDB-derived per-config files: one BuildTask each, all gated on
         # the validate marker and stale vs. the source UDB yaml.
+        # The headers also define the experimental extensions and parameters of test_config.yaml.
         udb_outputs: list[tuple[Path, PythonAction]] = [
             (
                 env_dir / "rvtest_config.h",
-                PythonAction(_generate_one_dut_header, (src, env_dir / "rvtest_config.h", "cfg-c-header")),
+                PythonAction(
+                    _generate_one_dut_header,
+                    (src, env_dir / "rvtest_config.h", "cfg-c-header", cfg.experimental_defines),
+                ),
             ),
             (
                 env_dir / "rvtest_config.svh",
-                PythonAction(_generate_one_dut_header, (src, env_dir / "rvtest_config.svh", "cfg-svh-header")),
+                PythonAction(
+                    _generate_one_dut_header,
+                    (src, env_dir / "rvtest_config.svh", "cfg-svh-header", cfg.experimental_defines),
+                ),
             ),
             (env_dir / "extensions.txt", PythonAction(generate_extension_list, (src, env_dir))),
         ]
@@ -219,8 +226,13 @@ def get_implemented_extensions(extension_list_file: Path) -> frozenset[str]:
     return frozenset(extension_list_file.read_text().splitlines())
 
 
-def _generate_one_dut_header(udb_config_file: Path, output_file: Path, subcommand: str) -> None:
+def _generate_one_dut_header(
+    udb_config_file: Path, output_file: Path, subcommand: str, experimental_defines: tuple[str, ...] = ()
+) -> None:
     """Run `udb-gen <subcommand>` for the given config and write the result to output_file.
+
+    The macros in experimental_defines, for the experimental extensions and parameters that UDB does not define,
+    are added before the include guard ends.
 
     On failure, raise with the udb-gen output as the message so the build
     system reports it through its normal post-build failure path. Like
@@ -237,6 +249,19 @@ def _generate_one_dut_header(udb_config_file: Path, output_file: Path, subcomman
         details = f"{stderr}{stdout}".strip()
         message = f"Failed to generate {output_file.name} for {udb_config_file.stem}"
         raise RuntimeError(f"{message}\n{details}" if details else message) from e
+    if experimental_defines:
+        _add_experimental_defines(output_file, experimental_defines, svh=subcommand == "cfg-svh-header")
+
+
+def _add_experimental_defines(header: Path, names: tuple[str, ...], *, svh: bool) -> None:
+    """Define names in a udb-gen header, before the #endif or `endif of its include guard."""
+    note = "Experimental extensions and parameters from test_config.yaml, which UDB does not define"
+    directive = "`define" if svh else "#define"
+    block = [f"// {note}" if svh else f"/* {note} */", *(f"{directive} {name}" for name in names), ""]
+    lines = header.read_text().splitlines()
+    guard_end = "`endif" if svh else "#endif"
+    end = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith(guard_end)), len(lines))
+    header.write_text("\n".join([*lines[:end], *block, *lines[end:]]) + "\n")
 
 
 # TODO: Generate Sail config file from UDB

@@ -1,0 +1,19 @@
+# Mapping of normative rules to coverpoints for the Smvatag test suite
+#
+# Smvatag_Sm runs in M-mode, Smvatag_S in S-mode and U-mode, Smvatag_H in VS-mode and VU-mode.
+
+# Remove once Smvatag's rules are tagged in its specification
+untagged_upstream: Smvatag (riscv/riscv-memory-tagging) has no normative rule tags yet
+
+normative_rule_definitions:
+  # mvitt holds the tag table base of M-mode, which must be 4 KiB aligned. The Zimt settag tests store tags in it.
+  - name: smvatag_vitt
+    coverpoint:
+      [
+        "Smvatag_Sm_cg/cp_vitt_warl",
+        "Zimt_Sm_cg/{cp_settag_mt_tag4_chunks, cp_settag_mt_tag7_chunks, cp_settag_addr_msb, cp_settag_mprv}",
+      ]
+
+  # mvitt is an M-mode CSR.
+  - name: smvatag_vitt_acc
+    coverpoint: ["{Smvatag_S_cg, Smvatag_U_cg, Smvatag_H_cg}/cp_vitt_access"]

@@ -1,0 +1,11 @@
+name: sargantana4-rv64gcbh-zimt
+compiler_exe: riscv64-unknown-elf-gcc # executable name on $PATH or full path to executable
+objdump_exe: riscv64-unknown-elf-objdump # executable name on $PATH or full path to executable, optional
+ref_model_exe: sail_riscv_sim # executable name on $PATH or full path to executable
+udb_config: sargantana4-rv64gcbh-zimt.yaml
+linker_script: link.ld
+dut_include_dir: . # Directory containing DUT specific rvmodel_macros.h header
+# Implemented, but not defined by UDB: listed here instead of in the UDB config
+experimental_extensions: [Zimt, Svatag, Smvatag]
+experimental_params:
+  ZIMT_POINTER_TAG_WIDTH_7: true # 7-bit pointer tags (def_pkg::RV_ZIMT_TAG7), as in sail.json

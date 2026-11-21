@@ -33,6 +33,7 @@ class HCsr:
         addresses (addr_csr_tests)
     gate: preprocessor condition under which the CSR exists
     warl_fields: WARL fields with reserved encodings, as for csr_walk_test
+    unchecked_bits: (bits, define) pairs written but not checked when define is defined, as for csr_access_test
     setup, restore: lines before and after the test that make the CSR accessible or its value visible
     asm: the operand instructions use when the assembler does not know the name (an encoding.h constant)
     """
@@ -44,6 +45,7 @@ class HCsr:
     vaddr: bool = False
     gate: str | None = None
     warl_fields: tuple[tuple, ...] = ()
+    unchecked_bits: tuple[tuple[int, str], ...] = ()
     setup: tuple[str, ...] = ()
     restore: tuple[str, ...] = ()
     asm: str = ""

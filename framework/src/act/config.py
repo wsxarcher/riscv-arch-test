@@ -15,7 +15,13 @@ from pathlib import Path
 from pydantic import BaseModel, DirectoryPath, Field, FilePath, ValidationInfo, field_validator, model_validator
 from ruamel.yaml import YAML
 
-from act.toolchain import CompilerType, Toolchain
+from act.toolchain import EXPERIMENTAL_EXTENSIONS, CompilerType, Toolchain
+
+# Boolean parameters of experimental extensions that UDB does not define, with the extension each belongs to
+EXPERIMENTAL_PARAMS: dict[str, str] = {
+    # Zimt supports 7-bit pointer tags (MT_MODE = 0b11) besides the mandatory 4-bit ones
+    "ZIMT_POINTER_TAG_WIDTH_7": "Zimt",
+}
 
 
 class RefModelType(str, Enum):
@@ -53,8 +59,59 @@ class Config(BaseModel):
     ref_model_type: RefModelType  # Inferred from ref_model_exe by model validator
     include_priv_tests: bool = True
     harts: int = Field(default=1, ge=1)
+    # Experimental extensions the DUT implements that UDB does not define, so the UDB config cannot list them
+    experimental_extensions: frozenset[str] = frozenset()
+    # Parameters of those extensions (EXPERIMENTAL_PARAMS), which UDB does not define either
+    experimental_params: dict[str, bool] = Field(default_factory=dict)
 
     model_config = {"frozen": True}
+
+    @property
+    def enables_experimental_extensions(self) -> bool:
+        """Whether every build of this config enables experimental extensions.
+
+        An experimental extension can change how other extensions' instructions behave (Zimt changes Zimop),
+        so the reference model must model it in every test of a DUT that implements it.
+        """
+        return bool(self.experimental_extensions)
+
+    @property
+    def experimental_defines(self) -> tuple[str, ...]:
+        """Macros for the experimental extensions and parameters, named as UDB names its extensions and parameters.
+
+        Each extension defines NAME_SUPPORTED and each true parameter defines UDB_NAME, as in rvtest_config.h.
+        """
+        names = [f"{extension.upper()}_SUPPORTED" for extension in sorted(self.experimental_extensions)]
+        names += [f"UDB_{name}" for name, value in sorted(self.experimental_params.items()) if value]
+        return tuple(names)
+
+    @field_validator("experimental_extensions")
+    @classmethod
+    def validate_experimental_extensions(cls, v: frozenset[str]) -> frozenset[str]:
+        """Ensure each listed extension is one the framework treats as experimental."""
+        unknown = sorted(v - EXPERIMENTAL_EXTENSIONS)
+        if unknown:
+            raise ValueError(
+                f"experimental_extensions lists {', '.join(unknown)}, which are not experimental extensions "
+                f"({', '.join(sorted(EXPERIMENTAL_EXTENSIONS))})"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def validate_experimental_params(self) -> "Config":
+        """Ensure each parameter is known and belongs to an extension listed in experimental_extensions."""
+        for name in sorted(self.experimental_params):
+            extension = EXPERIMENTAL_PARAMS.get(name)
+            if extension is None:
+                raise ValueError(
+                    f"experimental_params lists {name}, which is not an experimental parameter "
+                    f"({', '.join(sorted(EXPERIMENTAL_PARAMS))})"
+                )
+            if extension not in self.experimental_extensions:
+                raise ValueError(
+                    f"experimental_params lists {name}, but experimental_extensions does not list {extension}"
+                )
+        return self
 
     @field_validator("compiler_exe", "ref_model_exe", "objdump_exe")
     @classmethod

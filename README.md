@@ -218,6 +218,8 @@ It should contain the following fields:
 - `dut_include_dir`: Directory containing `rvmodel_macros.h`; interpreted relative to framework config file (use `.` for same directory as config file)
 - `harts`: Optional; number of harts available for testing; defaults to `1`
 - `include_priv_tests`: Optional; defaults to `True`; if set to `False`, all tests that rely on privilege modes will be skipped
+- `experimental_extensions`: Optional; experimental extensions that the DUT implements but UDB does not define yet, such as `Zimt`. They are added to the extensions of the UDB config for test selection and defined in `rvtest_config.h` and `rvtest_config.svh` (`ZIMT_SUPPORTED`), and every build of the configuration enables experimental extensions, as `ENABLE_EXPERIMENTAL_EXTENSIONS` does, so that the reference model also models them in the tests of other extensions
+- `experimental_params`: Optional; boolean parameters of the `experimental_extensions`, which UDB does not define either. A true parameter is defined as UDB defines its boolean parameters, such as `UDB_ZIMT_POINTER_TAG_WIDTH_7` for `ZIMT_POINTER_TAG_WIDTH_7: true` (7-bit pointer tags supported). The reference model configuration must agree
 
 See [test_config.yaml](./config/cores/cvw/cvw-rv64gc/test_config.yaml) for an example framework config file.
 

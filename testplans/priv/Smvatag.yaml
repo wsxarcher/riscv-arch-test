@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=testplan.schema.json
+suite: Smvatag
+source: https://github.com/riscv/riscv-memory-tagging/blob/main/modules/ROOT/pages/mte_vatag.adoc
+notes: |
+  covergroups Smvatag_Sm_cg, Smvatag_S_cg, Smvatag_U_cg and Smvatag_H_cg
+  Smvatag defines mvitt, the virtually indexed tag table (VITT) base CSR of M-mode. Its address is the Sail model's placeholder (rvtest_experimental.h).
+  Smvatag_Sm boots to M-mode, Smvatag_S to S-mode, Smvatag_U to U-mode (also without S-mode), and Smvatag_H to HS-mode and runs in VS-mode and VU-mode.
+coverpoints:
+  - name: cp_vitt_warl
+    goal: The M-mode tag table base is 4 KiB aligned
+    description: |-
+      In M-mode, write aligned bases to mvitt and read them back.
+      Write bases that are not aligned, whose legalization is implementation-defined, and record whether bits 11:0 read 0.
+    expectation: An aligned base reads back as written. After a base that is not aligned, 1.
+    bins: 2 (aligned, not aligned)
+  - name: cp_vitt_access
+    goal: mvitt is an M-mode CSR
+    description: |-
+      In S, U, VS and VU modes, read mvitt, write it with csrrw, and read it again.
+      T-SBI calls, which access mvitt from M-mode, write a base to it first and read it after the write.
+    expectation: Every access raises an illegal-instruction exception, and mvitt keeps the base written first.
+    bins: S, U, VS, VU x 2 (read, write)

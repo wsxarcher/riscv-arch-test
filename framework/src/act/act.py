@@ -154,7 +154,7 @@ def run_act(
                 debug,
                 verbose,
                 dry_run,
-                enable_experimental_extensions,
+                enable_experimental_extensions or config.enables_experimental_extensions,
                 exclude_sm,
                 max(1, jobs // len(config_files)),
             )

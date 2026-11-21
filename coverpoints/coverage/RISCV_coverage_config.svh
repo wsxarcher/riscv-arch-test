@@ -122,6 +122,9 @@
 `ifdef SMSTATEEN_COVERAGE
   `include "Smstateen_coverage.svh"
 `endif
+`ifdef SMVATAG_COVERAGE
+  `include "Smvatag_coverage.svh"
+`endif
 `ifdef SSCCPTR_COVERAGE
   `include "Ssccptr_coverage.svh"
 `endif
@@ -163,6 +166,9 @@
 `endif
 `ifdef SVADU_COVERAGE
   `include "Svadu_coverage.svh"
+`endif
+`ifdef SVATAG_COVERAGE
+  `include "Svatag_coverage.svh"
 `endif
 `ifdef SVBARE_COVERAGE
   `include "Svbare_coverage.svh"
@@ -349,6 +355,9 @@
 `endif
 `ifdef ZIMOP_COVERAGE
   `include "Zimop_coverage.svh"
+`endif
+`ifdef ZIMT_COVERAGE
+  `include "Zimt_coverage.svh"
 `endif
 `ifdef ZKND_COVERAGE
   `include "Zknd_coverage.svh"

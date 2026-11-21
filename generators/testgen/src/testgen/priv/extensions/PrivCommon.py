@@ -182,6 +182,9 @@ S_CSRS = [
     ("sie", 0xFFFF),  # only test standard non-reserved portion
 ]
 S_CSR_SENVCFG = ("senvcfg", None)
+# senvcfg.MT_MODE (bits 35:34, Zimt) is not checked when 0b11 is reserved (no 7-bit pointer tags): a write of
+# all ones then leaves an implementation-defined legal value
+SENVCFG_UNCHECKED_BITS = [(0b11 << 34, "ZIMT_MT_MODE_11_RESERVED")]
 
 
 def _vaddr_walk_step(

@@ -129,3 +129,44 @@ include::norm/Ssqosid_norm_rules.adoc[]
 
 TODO: This text is here to prevent Asciidoctor from rendering strangely after an empty table.
 Delete it when table is populated.
+
+==== Zimt Memory Tagging
+
+Zimt is not ratified, and UDB does not define it yet, so its tests are built only for a configuration whose `test_config.yaml` lists Zimt under `experimental_extensions`, which also enables experimental extensions as `ENABLE_EXPERIMENTAL_EXTENSIONS` does.
+Zimt takes its instructions from Zimop: `gentag`, `addtag` and `checktag` are MOP.RR.1 encodings and `settag` is a MOP.RR.0 encoding.
+The suite has one group per privilege mode: Zimt_Sm, Zimt_S, Zimt_U and Zimt_H (VS-mode and VU-mode).
+Each group covers the instructions with memory tagging disabled, the MT_MODE fields and tag generation exclusion mask CSRs, the software-check exception in the delegation and cause CSRs, `gentag`, `addtag`, `settag` and `checktag` with memory tagging enabled, and the implicit tag checks of loads and stores.
+The `settag` and `checktag` tests store and check tags in the tag table of each mode, which needs Svatag (S, U, VS and VU modes) or Smvatag (M-mode), and pointer masking of that mode to ignore the pointer tags in the address.
+They check every tag byte and half byte around the tags; the store/AMO page faults, guest-page faults and access faults of tag stores, including the one of tag storage in memory that is not idempotent; the masked address of `rs1`, sign-extended with address translation and zero-extended without; and, with `mstatus.MPRV`, the tag table of the current privilege with the pointer masking and translation of the effective one.
+The `checktag` tests check the range of chunks that it compares and the software-check exception of a mismatch, and the load page faults, guest-page faults and access faults of tag loads.
+Without first-stage address translation, the scalar loads and stores of data, other than those that use `sp` as the base register, are tag checked: the tests cover each kind of load and store, integer, floating-point and compressed (Zca, Zcb, Zcd), the `sp`-relative ones and `checktag` with `sp`, misaligned ones over two chunks, of which no part may be performed when a chunk mismatches, the access faults of tag loads before those of the data, a memory tag with bit 7 set, `mstatus.MPRV` (also with `MPV`), the order of the tag checks after the hart's own tag stores and `settag`, the accesses that are not checked (LR/SC, AMOs, CMOs, HLV/HSV and vector loads and stores), and the software-check exceptions that `hedeleg` delegates to VS-mode; with first-stage address translation (`satp`, `vsatp`), the loads and stores are not checked, as the PTE.MTAG bit is not allocated yet, while with the G stage only (`vsatp` Bare) they are, and their tag loads can raise load guest-page faults.
+The M-mode trap handler runs with M-mode's memory tagging, and reads the trapping instruction of S-mode with `mstatus.MPRV`, so the M-mode tests, and the S-mode ones without address translation, raise no exception with memory tagging enabled, and the M-mode tests check mismatches with `mstatus.MPRV`.
+Misaligned loads and stores over two chunks are tested in those modes only with `UDB_MISALIGNED_LDST`, as they trap otherwise.
+The access-fault cases need `RVMODEL_ACCESS_FAULT_ADDRESS_STORE` and `RVMODEL_ACCESS_FAULT_ADDRESS_LOAD`, and exist only if the DUT defines them.
+The specification does not allocate the CSR addresses yet: the tests use the placeholders of the Sail model.
+4-bit pointer tags are mandatory and 7-bit ones optional: a configuration that supports them sets `ZIMT_POINTER_TAG_WIDTH_7` under `experimental_params`, and the cases and bins that need them exist only then.
+
+include::{testplansdir}/priv/Zimt.adoc[]
+
+include::norm/Zimt_norm_rules.adoc[]
+
+==== Svatag Supervisor Tag Table Bases
+
+Svatag is not ratified, and UDB does not define it yet, so its tests are built only for a configuration whose `test_config.yaml` lists Svatag under `experimental_extensions`, which also enables experimental extensions as `ENABLE_EXPERIMENTAL_EXTENSIONS` does.
+It defines the tag table base CSRs of S, U, VS and VU modes, for the Zimt tag accesses.
+The tests cover the CSRs' WARL behavior and their access from each mode, including the VS-mode access to `svitts` and `svittu`, which reaches `vsvitts` and `vsvittu`.
+The Zimt `settag` and `checktag` tests check which tag table each mode uses.
+The tag table protection is not tested yet.
+
+include::{testplansdir}/priv/Svatag.adoc[]
+
+include::norm/Svatag_norm_rules.adoc[]
+
+==== Smvatag Machine Tag Table Base
+
+Smvatag is not ratified, and UDB does not define it yet, so its tests are built only for a configuration whose `test_config.yaml` lists Smvatag under `experimental_extensions`, which also enables experimental extensions as `ENABLE_EXPERIMENTAL_EXTENSIONS` does.
+It defines `mvitt`, the tag table base CSR of M-mode.
+
+include::{testplansdir}/priv/Smvatag.adoc[]
+
+include::norm/Smvatag_norm_rules.adoc[]

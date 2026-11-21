@@ -94,8 +94,30 @@ def gen_csr_write_sigupd(check_reg: int, csr_name: str, test_data: TestData) -> 
     )
 
 
+def _unchecked_bits_lines(
+    unchecked_bits: list[tuple[int, str]] | None, mask_reg: int | None, tmp_reg: int
+) -> list[str]:
+    """Clear the bits of each (bits, define) pair from the readback mask in mask_reg when define is defined."""
+    lines = []
+    for bits, define in unchecked_bits or []:
+        assert mask_reg is not None, "unchecked_bits needs a readback mask register"
+        lines += [
+            f"#ifdef {define}",
+            f"LI(x{tmp_reg}, {~bits & ((1 << 64) - 1)})    # Do not check bits {bits:#x}",
+            f"and x{mask_reg}, x{mask_reg}, x{tmp_reg}",
+            f"#endif // {define}",
+        ]
+    return lines
+
+
 def csr_access_test(
-    test_data: TestData, csr: tuple, covergroup: str, coverpoint: str, maskedwrites: bool = False, bin_prefix: str = ""
+    test_data: TestData,
+    csr: tuple,
+    covergroup: str,
+    coverpoint: str,
+    maskedwrites: bool = False,
+    bin_prefix: str = "",
+    unchecked_bits: list[tuple[int, str]] | None = None,
 ) -> list[str]:
     """
     Generate a CSR access test: write all 1s, write all 0s, set all, clear all.
@@ -108,11 +130,16 @@ def csr_access_test(
         coverpoint: Coverpoint name for testcase strings
         maskedwrites: If True, the CSR is written with a mask applied to the value being written.
         bin_prefix: Prefix for the testcase bin names, to keep them unique when a CSR is tested more than once.
+        unchecked_bits: Optional (bits, define) pairs, as for csr_walk_test: the bits are written but removed
+            from the readback mask when `define` is defined for the config.
 
     Returns:
         List of assembly lines for the access test
     """
     csr_name, mask = csr
+    if unchecked_bits and mask is None:
+        mask = (1 << 64) - 1
+        csr = (csr_name, mask)
     if maskedwrites:
         assert mask is not None, f"maskedwrites requires a csr mask (got None for {csr_name})"
     if mask is not None:
@@ -140,6 +167,7 @@ def csr_access_test(
             )
         else:
             lines.append(f"LI(x{mask_reg}, {mask})    # Load mask ({mask:#x})")
+        lines.extend(_unchecked_bits_lines(unchecked_bits, mask_reg, check_reg))
     if maskedwrites:
         valstr = "mask"
         lines.append(f"mv x{temp_reg}, x{mask_reg}    # Apply {valstr} to value being written")
@@ -183,6 +211,7 @@ def _warl_reserved_check(
     check_reg: int,
     warl_mask_reg: int,
     warl_mask: int,
+    unchecked_bits: list[tuple[int, str]] | None = None,
 ) -> list[str]:
     """
     Generate the readback for a walk iteration that wrote reserved values to WARL fields.
@@ -205,12 +234,14 @@ def _warl_reserved_check(
         check_reg: Scratch register for the readback
         warl_mask_reg: Scratch register for the mask
         warl_mask: CSR mask with the reserved fields' bits excluded
+        unchecked_bits: The walk's (bits, define) pairs, also excluded from the mask when define is defined
     """
     field_list = ", ".join(f[0].upper() for f in reserved_fields)
     lines = [
         f"{INDENT}# {field_list} written with a reserved value; legalization is implementation-defined,",
         f"{INDENT}# so check the other bits exactly and only check {field_list} for a legal (non-reserved) value.",
         f"LI(x{warl_mask_reg}, {warl_mask:#x})    # Load mask excluding {field_list}",
+        *_unchecked_bits_lines(unchecked_bits, warl_mask_reg, check_reg),
         test_data.add_testcase(bin_name, coverpoint, covergroup),
         gen_csr_read_sigupd(check_reg, (csr_name, warl_mask), test_data, warl_mask_reg),
     ]
@@ -337,6 +368,7 @@ def csr_walk_test(
                     check_reg,
                     warl_mask_reg,
                     warl_mask_for(reserved),
+                    unchecked_bits,
                 )
             gate, rest = remaining[0], remaining[1:]
             gated = [f for f in matched if len(f) == 5 and f[4] == gate]
@@ -359,13 +391,7 @@ def csr_walk_test(
     ]
     if mask is not None:
         lines.append(f"LI(x{mask_reg}, {mask})    # Load mask ({mask:#x})")
-        for bits, define in unchecked_bits or []:
-            lines += [
-                f"#ifdef {define}",
-                f"LI(x{check_reg}, {~bits & ((1 << 64) - 1)})    # Do not check bits {bits:#x}",
-                f"and x{mask_reg}, x{mask_reg}, x{check_reg}",
-                f"#endif // {define}",
-            ]
+        lines.extend(_unchecked_bits_lines(unchecked_bits, mask_reg, check_reg))
     if walk_zeros:
         lines.append(f"LI(x{temp_reg}, -1)             # x{temp_reg} = all 1s")
 

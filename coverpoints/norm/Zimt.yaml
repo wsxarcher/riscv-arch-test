@@ -1,0 +1,236 @@
+# Mapping of normative rules to coverpoints for the Zimt test suite
+#
+# The tests run once per privilege mode: Zimt_Sm in M-mode, Zimt_S in S-mode, Zimt_U in U-mode, and Zimt_H in
+# VS-mode and VU-mode (and HS-mode for its CSRs), with memory tagging disabled and enabled in that mode. The settag
+# tests store tags in the tag tables of Svatag and Smvatag, and the checktag tests check them, with checktag and with
+# the implicit tag checks of loads and stores.
+
+# Remove once Zimt's rules are tagged in its specification
+untagged_upstream: Zimt (riscv/riscv-memory-tagging) has no normative rule tags yet
+
+normative_rule_definitions:
+  # gentag rd is MOP.RR.1 with bit 24 = 0, tag_imm4 = 0, rs1 = x0 and rd != x0. The MOP.RR.1 encodings that miss one of
+  # these conditions, and are not addtag or checktag, stay Zimop instructions.
+  - name: zimt_gentag_enc
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_gentag_mt_disabled, cp_mop_rr_not_zimt}",
+      ]
+
+  # With memory tagging disabled in the current execution environment, gentag falls back to Zimop behavior and
+  # writes 0 to rd.
+  - name: zimt_gentag_mt_disabled
+    coverpoint:
+      ["{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_gentag_mt_disabled"]
+
+  # addtag rd, rs1, tag_imm4 is MOP.RR.1 with bit 24 = 0, tag_imm4 != 0 and rd != x0.
+  - name: zimt_addtag_enc
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_addtag_mt_disabled_imm, cp_addtag_mt_disabled_rd, cp_addtag_mt_disabled_rs1, cp_mop_rr_not_zimt}",
+      ]
+
+  # With memory tagging disabled in the current execution environment, addtag copies rs1 to rd, unlike the Zimop
+  # behavior of writing 0 to rd.
+  - name: zimt_addtag_mt_disabled
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_addtag_mt_disabled_imm, cp_addtag_mt_disabled_rd, cp_addtag_mt_disabled_rs1, cp_addtag_mt_disabled_rd_rs1}",
+      ]
+
+  # checktag rs1, chunk_count is MOP.RR.1 with bit 24 = 0, rd = x0 and rs1 != x0.
+  - name: zimt_checktag_enc
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_checktag_mt_disabled_imm, cp_checktag_mt_disabled_rs1, cp_mop_rr_not_zimt}",
+      ]
+
+  # With memory tagging disabled in the execution environment, checktag reverts to Zimop behavior: it loads no tag
+  # and raises no exception.
+  - name: zimt_checktag_mt_disabled
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_checktag_mt_disabled_imm, cp_checktag_mt_disabled_rs1}",
+      ]
+
+  # settag rs1, chunk_count is MOP.RR.0 with bit 24 = 0, rd = x0 and rs1 != x0.
+  - name: zimt_settag_enc
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_settag_mt_disabled_imm, cp_settag_mt_disabled_rs1, cp_mop_rr_not_zimt}",
+      ]
+
+  # With memory tagging disabled in the current execution environment, settag falls back to Zimop behavior and
+  # writes x0, which is a no-op: it stores no tag and raises no exception.
+  - name: zimt_settag_mt_disabled
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_settag_mt_disabled_imm, cp_settag_mt_disabled_rs1}",
+      ]
+
+  # With memory tagging enabled in the current execution environment, settag stores mc_tag, the pointer tag of rs1,
+  # as the tag of chunk_count + 1 consecutive memory chunks, from the chunk of the virtual address in rs1 (after pointer
+  # masking, with the translation of the effective privilege), in the tag table of the mode (Svatag, Smvatag).
+  - name: zimt_settag_mt_enabled
+    coverpoint:
+      [
+        "Zimt_Sm_cg/{cp_settag_mt_tag4_chunks, cp_settag_mt_tag7_chunks, cp_settag_mt_tag4_rs1, cp_settag_addr_msb, cp_settag_mprv}",
+        "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_settag_mt_enabled",
+        "Zimt_S_cg/cp_settag_addr_msb",
+        "Zimt_H_cg/{cp_settag_two_stage, cp_settag_g_stage}",
+      ]
+
+  # With pointer_tag_width = 4, a byte of tag storage holds the 4-bit mc_tags of two chunks, so settag may read,
+  # modify and write it. With pointer_tag_width = 7, mc_tag is 8 bits wide.
+  - name: zimt_settag_rmw
+    coverpoint:
+      ["Zimt_Sm_cg/{cp_settag_mt_tag4_chunks, cp_settag_mt_tag7_chunks}"]
+
+  # settag can raise store/AMO page faults (and guest-page faults) and access faults on the tag address. Tag storage
+  # must be readable, writable and idempotent memory, else settag raises a store/AMO access fault.
+  - name: zimt_settag_exceptions
+    coverpoint:
+      [
+        "{Zimt_S_cg, Zimt_U_cg}/cp_settag_mt_enabled",
+        "Zimt_H_cg/{cp_settag_two_stage, cp_settag_g_stage}",
+      ]
+
+  # With memory tagging enabled in the current execution environment, checktag loads the mc_tags of chunk_count + 1
+  # consecutive memory chunks, from the chunk of the virtual address in rs1 (after pointer masking, with the
+  # translation of the effective privilege), from the tag table of the mode, and compares each with the pointer tag of
+  # rs1: the first mismatch raises a software-check exception.
+  - name: zimt_checktag_mt_enabled
+    coverpoint:
+      [
+        "Zimt_Sm_cg/{cp_checktag_mt_tag4_chunks, cp_checktag_mt_tag7_chunks, cp_checktag_mprv, cp_checktag_mprv_m_pmm}",
+        "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_checktag_mt_enabled",
+        "Zimt_S_cg/cp_checktag_addr_msb",
+        "Zimt_H_cg/{cp_checktag_two_stage, cp_checktag_g_stage}",
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_checktag_sp",
+      ]
+
+  # checktag can raise load page faults (and guest-page faults) and access faults on the tag address. Tag storage
+  # must be readable.
+  - name: zimt_checktag_exceptions
+    coverpoint:
+      [
+        "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_checktag_mt_enabled",
+        "Zimt_H_cg/{cp_checktag_two_stage, cp_checktag_g_stage}",
+      ]
+
+  # With memory tagging enabled and paging disabled, all data pages are tagged-data pages: the explicit loads and
+  # stores of data are checked accesses, which compare the pointer tag of the address with the mc_tag of each chunk
+  # they access, before the access, with the tag table and MT_MODE of their effective privilege. A mismatch raises a
+  # software-check exception; a tag load can raise a load access fault.
+  - name: zimt_checked_access
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_checked_access, cp_checked_two_chunks}",
+        "{Zimt_U_cg, Zimt_H_cg}/cp_checked_fault",
+        "Zimt_Sm_cg/{cp_checked_mprv, cp_checked_mprv_m_mt, cp_checked_mprv_v}",
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_unchecked_access",
+      ]
+
+  # Memory accesses that use the stack pointer (x2) as the base register are not checked accesses.
+  - name: zimt_checked_access_sp
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_checked_sp, cp_checked_sp_compressed}",
+      ]
+
+  # With paging enabled, only pages with PTE.MTAG = 1 are tagged-data pages. The PTE.MTAG bit is not allocated yet,
+  # so the loads and stores of the tests with first-stage address translation (satp, vsatp) are not checked accesses.
+  - name: zimt_checked_access_paging
+    coverpoint: ["{Zimt_S_cg, Zimt_H_cg}/cp_checked_translated"]
+
+  # PTE.MTAG is a bit of first-stage page tables: with vsatp = Bare all data pages of VS-mode are tagged-data pages,
+  # also with G-stage translation, which translates the tag loads (load guest-page faults).
+  - name: zimt_checked_access_g_stage
+    coverpoint: ["Zimt_H_cg/cp_checked_g_stage"]
+
+  # The tag accesses of a hart are ordered with its own stores to the tag table and its settags.
+  - name: zimt_tag_ordering
+    coverpoint:
+      ["{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_checked_order"]
+
+  # The MOP.RR encodings that are not Zimt instructions still write 0 to rd, with memory tagging disabled or enabled.
+  - name: Zimop_mop-rr_op
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_mop_rr_not_zimt",
+        "Zimt_Sm_cg/{cp_mop_rr_not_zimt_mt_tag4, cp_mop_rr_not_zimt_mt_tag7}",
+      ]
+
+  # MT_MODE (bits 35:34) of mseccfg, menvcfg, senvcfg and henvcfg enables memory tagging for M, S/HS, U/VU and VS
+  # mode: 00 disables it, 01 is reserved, 10 enables it with pointer_tag_width = 4 and 11 with pointer_tag_width = 7.
+  # pointer_tag_width = 4 is mandatory and 7 optional: software discovers 7-bit tag support by writing 11 and reading
+  # it back.
+  - name: zimt_mt_mode
+    coverpoint: ["{Zimt_Sm_cg, Zimt_S_cg, Zimt_H_cg}/cp_mt_mode_warl"]
+
+  # hstatus.VUMT_MODE (bits 51:50) is the xMT_MODE of HLV and HSV from HU-mode with effective privilege VU.
+  - name: zimt_vumt_mode
+    coverpoint: ["Zimt_H_cg/cp_vumt_mode_warl"]
+
+  # xMT_MODE comes from mseccfg (M), menvcfg (S/HS), senvcfg (U and VU) or henvcfg (VS).
+  - name: zimt_mt_mode_source
+    coverpoint:
+      [
+        "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_gentag_mt_enabled, cp_addtag_mt_enabled}",
+        "Zimt_Sm_cg/{cp_gentag_mt_tag4_tag, cp_gentag_mt_tag7_tag, cp_addtag_mt_enabled, cp_settag_mprv}",
+      ]
+
+  # With memory tagging enabled, gentag writes rd with a pseudorandom pointer tag that the active tag generation
+  # exclusion mask permits, uniformly distributed over those tags, in the pointer tag bits, and 0 elsewhere. The tests
+  # check that it draws only permitted tags, and each of two permitted ones, but not the distribution.
+  - name: zimt_gentag_mt_enabled
+    coverpoint:
+      [
+        "Zimt_Sm_cg/{cp_gentag_mt_tag4_tag, cp_gentag_mt_tag7_tag, cp_gentag_mt_tag7_high, cp_gentag_mt_several, cp_gentag_mt_tag4, cp_gentag_mt_tag7}",
+        "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_gentag_mt_enabled",
+      ]
+
+  # The active tag generation exclusion mask comes from mmtagexclude (M), menvmtagexclude (S/HS), senvmtagexclude
+  # (U and VU) or henvmtagexclude (VS). With pointer_tag_width = 4 only bits 15:0 are active.
+  - name: zimt_gentag_mask_source
+    coverpoint:
+      [
+        "Zimt_Sm_cg/{cp_gentag_mt_tag4_tag, cp_gentag_mt_tag7_tag}",
+        "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_gentag_mt_enabled",
+      ]
+
+  # With memory tagging enabled, addtag adds tag_imm4 to the pointer tag of rs1, modulo 2^pointer_tag_width, and
+  # keeps the other bits. The exclusion mask does not affect it.
+  - name: zimt_addtag_mt_enabled
+    coverpoint:
+      [
+        "Zimt_Sm_cg/{cp_addtag_mt_tag4_imm, cp_addtag_mt_tag4_rd, cp_addtag_mt_tag4_rs1, cp_addtag_mt_tag4_rd_rs1, cp_addtag_mt_tag7_imm, cp_addtag_mt_tag7_rd, cp_addtag_mt_tag7_rs1, cp_addtag_mt_tag7_rd_rs1}",
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_addtag_mt_enabled",
+      ]
+
+  # The tag generation exclusion mask CSRs are WARL: a legal value leaves one of bits 15:0 clear, and which bits an
+  # illegal write leaves clear is implementation-defined. Without pointer_tag_width = 7, bits 127:16 may be hardwired to
+  # zero. They reset to 0.
+  - name: zimt_mtagexclude_warl
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_H_cg}/{cp_mtagexclude0_warl, cp_mtagexclude1_write}",
+        "Zimt_Sm_cg/cp_mtagexclude_reset",
+      ]
+
+  # mmtagexclude and menvmtagexclude are M-mode CSRs, senvmtagexclude is an S-mode CSR, which VS-mode accesses
+  # directly, and henvmtagexclude is a hypervisor CSR.
+  - name: zimt_mtagexclude_acc
+    coverpoint: ["{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_csr_access"]
+
+  # A tag mismatch raises a software-check exception (cause 18) with xtval = 4, which medeleg and hedeleg can
+  # delegate.
+  - name: zimt_swcheck
+    coverpoint:
+      [
+        "{Zimt_Sm_cg, Zimt_S_cg, Zimt_H_cg}/cp_swcheck_cause",
+        "{Zimt_Sm_cg, Zimt_H_cg}/cp_swcheck_deleg",
+        "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_checktag_mt_enabled",
+        "{Zimt_U_cg, Zimt_H_cg}/cp_checked_access",
+        "Zimt_H_cg/cp_swcheck_to_vs",
+      ]

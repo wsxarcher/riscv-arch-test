@@ -36,6 +36,7 @@ from testgen.priv.extensions.PrivCommon import (
     S_CSRS,
     S_SSTATUS_MASK,
     SCAUSE_CODES,
+    SENVCFG_UNCHECKED_BITS,
     SV_GATE,
     addr_csr_tests,
     csr_insufficient_priv_tests,
@@ -805,7 +806,9 @@ def _generate_mcsr_tests(test_data: TestData, test_chunks: list) -> None:
     for csr in S_CSRS:
         tc.code.extend(csr_access_test(test_data, csr, covergroup, coverpoint))
     tc.code.extend(["", "#ifdef S1P12P0_OR_LATER_SUPPORTED"])
-    tc.code.extend(csr_access_test(test_data, S_CSR_SENVCFG, covergroup, coverpoint))
+    tc.code.extend(
+        csr_access_test(test_data, S_CSR_SENVCFG, covergroup, coverpoint, unchecked_bits=SENVCFG_UNCHECKED_BITS)
+    )
     tc.code.extend(["", "#endif // S1P12P0_OR_LATER_SUPPORTED"])
 
     ######################################

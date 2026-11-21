@@ -1,0 +1,25 @@
+# Mapping of normative rules to coverpoints for the Svatag test suite
+#
+# Svatag_S runs in S-mode and U-mode, Svatag_H in HS-mode, VS-mode and VU-mode.
+
+# Remove once Svatag's rules are tagged in its specification
+untagged_upstream: Svatag (riscv/riscv-memory-tagging) has no normative rule tags yet
+
+normative_rule_definitions:
+  # svitts, svittu, vsvitts and vsvittu hold the tag table base of S/HS, U, VS and VU mode, which must be 4 KiB
+  # aligned. The Zimt settag tests store tags in the tag table of each mode.
+  - name: svatag_vitt
+    coverpoint:
+      [
+        "{Svatag_S_cg, Svatag_H_cg}/cp_vitt_warl",
+        "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_settag_mt_enabled",
+        "Zimt_H_cg/{cp_settag_two_stage, cp_settag_g_stage}",
+      ]
+
+  # A CSR access to svitts and svittu from VS-mode uses the state of vsvitts and vsvittu.
+  - name: svatag_vitt_vs
+    coverpoint: ["Svatag_H_cg/cp_vitt_vs_redirect"]
+
+  # svitts and svittu are S-mode CSRs, vsvitts and vsvittu are hypervisor CSRs.
+  - name: svatag_vitt_acc
+    coverpoint: ["{Svatag_S_cg, Svatag_H_cg}/cp_vitt_access"]

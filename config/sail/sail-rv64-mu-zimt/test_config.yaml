@@ -1,0 +1,15 @@
+# spike-rv64-mu (M-mode and U-mode, without S-mode) with Zimt memory tagging (both pointer tag widths) and the Smvatag tag table
+# base CSR of M-mode, run on the Sail model itself. Svatag needs S-mode. sail.json is spike-rv64-mu's with Zimt and
+# Smvatag, and the keys that sail-riscv-wsxarcher's configuration schema adds at the model's defaults; rvmodel_macros.h
+# is sail-rv64-max's, whose console is HTIF.
+name: sail-rv64-mu-zimt
+compiler_exe: riscv64-unknown-elf-gcc # executable name on $PATH or full path to executable
+objdump_exe: riscv64-unknown-elf-objdump # executable name on $PATH or full path to executable, optional
+ref_model_exe: sail_riscv_sim # executable name on $PATH or full path to executable
+udb_config: sail-rv64-mu-zimt.yaml
+linker_script: link.ld
+dut_include_dir: . # Directory containing DUT specific rvmodel_macros.h header
+# Implemented, but not defined by UDB: listed here instead of in the UDB config
+experimental_extensions: [Zimt, Smvatag]
+experimental_params:
+  ZIMT_POINTER_TAG_WIDTH_7: true # as in sail.json

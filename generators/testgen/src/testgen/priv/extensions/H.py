@@ -33,6 +33,7 @@ from testgen.priv.extensions.HCommon import (
     sret_tests,
 )
 from testgen.priv.extensions.PrivCommon import (
+    SENVCFG_UNCHECKED_BITS,
     csr_insufficient_priv_tests,
     csr_ro_write_tests,
     xcause_write_tests,
@@ -90,7 +91,11 @@ H_UPPER_CSRS = [
 ]
 S_UNREPLICATED_CSRS = [
     HCsr("scounteren"),
-    HCsr("senvcfg", gate="defined(S1P12P0_OR_LATER_SUPPORTED)"),
+    HCsr(
+        "senvcfg",
+        gate="defined(S1P12P0_OR_LATER_SUPPORTED)",
+        unchecked_bits=tuple(SENVCFG_UNCHECKED_BITS),
+    ),
 ]
 # scountinhibit raises illegal instruction with menvcfg.CDE = 0, as boot leaves it, and virtual instruction in
 # VS-mode and VU-mode with CDE = 1
@@ -237,7 +242,14 @@ def _vs_csr_tests(test_data: TestData, test_chunks: list[TestChunk]) -> None:
     tc.section_header = comment_banner("cp_nonreplica", "In VS-mode, access each S CSR that has no VS replica")
     tc.code.append("RVTEST_TSBI_GOTO_VSMODE")
     for csr in S_UNREPLICATED_CSRS:
-        tc.code.extend(gated(csr_access_test(test_data, (csr.operand, csr.mask), VS_CG, "cp_nonreplica"), csr.gate))
+        lines = csr_access_test(
+            test_data,
+            (csr.operand, csr.mask),
+            VS_CG,
+            "cp_nonreplica",
+            unchecked_bits=list(csr.unchecked_bits) or None,
+        )
+        tc.code.extend(gated(lines, csr.gate))
     tc.code.extend(
         [
             *xstatus_sd_tests(test_data, "sstatus", VSSTATUS_CG, "cp_vsstatus_sd_write"),
