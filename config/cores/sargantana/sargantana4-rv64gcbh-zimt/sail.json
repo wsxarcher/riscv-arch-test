@@ -708,7 +708,8 @@
     "Shvstvala": { "supported": true },
     "Shvstvecd": { "supported": true },
     "Sstvecd": { "supported": true },
-    "Svukte": { "supported": false },
+    // senvcfg.UKTE and hstatus.HUKTE (def_pkg::RV_SVUKTE)
+    "Svukte": { "supported": true },
     "Zilx": { "supported": false },
     "Zibi": {
       "supported": false

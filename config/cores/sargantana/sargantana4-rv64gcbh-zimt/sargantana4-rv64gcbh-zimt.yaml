@@ -20,7 +20,8 @@ description: >-
   paths in that core_tile tree.  The core also implements the Zimt memory
   tagging CSRs, gentag, addtag, settag and checktag, the tag checks of loads and
   stores without address translation, and the Svatag and Smvatag tag table
-  bases; UDB does not define them, so test_config.yaml lists them.
+  bases; UDB does not define them, so test_config.yaml lists them.  It also
+  implements the draft Svukte (senvcfg.UKTE and hstatus.HUKTE).
 #
 # The ISA string comes from the misa constant, def_pkg::ISA_CODE:
 #   "| (1   <<  1)  // B - Bit Manipulation extension
@@ -241,6 +242,11 @@ implemented_extensions:
   # "assign invalid_pte = ((pte.n && is_pte_leaf && (pte.ppn[NAPOT_BITS-1:0] != NAPOT_PPN_ENCODING)) ||"
   #   https://github.com/bsc-loca/mmu/blob/cbb65eb714177c7de54dc89a20ec2fbc3cc73199/rtl/ptw/ptw.sv#L189
   - { name: Svnapot, version: "= 1.0.0" }
+  # Svukte: senvcfg.UKTE (bit 8) and hstatus.HUKTE (bit 24) are writable, and a load, store or fetch of effective
+  # privilege U or VU with satp (vsatp) translation raises a page fault at a virtual address with bit 63 set,
+  # without address translation (def_pkg::RV_SVUKTE; csr_bsc.sv csr_svukte_ld_st_o and csr_svukte_fetch_o,
+  # load_store_queue.sv svukte_fault, zimt_tag_unit.sv svukte_invalid, if_stage_1.sv ex_if_svukte_int).
+  - { name: Svukte, version: "= 0.4.0" }
   # senvcfg.PMM and henvcfg.PMM are implemented, so S-mode can enable pointer masking for U-mode
   # (Supm) and HS-mode for VS-mode (Ssnpm):
   #   "csr_rdata = {30'b0, senvcfg_q[33:32], 24'b0, senvcfg_q[7:4], 3'b0, senvcfg_q[0]}; // only implemented FIOM & CMO & PMM"
