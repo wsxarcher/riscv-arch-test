@@ -18,8 +18,9 @@ Each group (Sm: M-mode, S: S-mode, U: U-mode, H: VS-mode and VU-mode, entered fr
   copies rs1 to rd, and checktag and settag do nothing. The other MOP.RR.0 and MOP.RR.1 encodings stay Zimop
   instructions, which write 0 to rd.
 - <group>_csr: the MT_MODE fields and tag generation exclusion mask CSRs that the group's modes write (WARL
-  behavior, and access from each mode), and the software-check exception (cause 18) in medeleg, hedeleg and xcause.
-  T-SBI calls read the CSRs from M-mode or HS-mode after each write from a less privileged mode.
+  behavior, and access from each mode), the software-check exception (cause 18) in medeleg, hedeleg and xcause, and
+  mstatus.MTAG_I (Sm_csr, which sstatus does not show) and hstatus.MTAG_I (H_csr). T-SBI calls read the CSRs from
+  M-mode or HS-mode after each write from a less privileged mode.
 - <group>_mt: gentag and addtag with memory tagging enabled, with 4-bit tags and, if the config supports them, 7-bit
   tags, which also shows which MT_MODE field and exclusion mask each mode uses. A mask either permits one tag value,
   or the test checks only that each draw is a permitted value, so the results do not depend on how a hart draws its
@@ -37,16 +38,28 @@ Each group (Sm: M-mode, S: S-mode, U: U-mode, H: VS-mode and VU-mode, entered fr
   specification says both that tag accesses must not raise one and that settag may without misaligned support.
 - <group>_checktag: checktag, and the implicit tag checks of loads and stores, with memory tagging enabled, with 4-bit
   and 7-bit tags. With Bare first-stage address translation (satp, or vsatp at V=1) in the effective privilege mode,
-  the scalar loads and stores of data that do not use sp as the base register are checked: a mismatch raises a software-check exception (xtval 4) before
-  the access, a fault of a tag load a load access fault. A data page has its tags in the tag table through the tag
-  table base of the mode. Sm_checktag sweeps checktag between mismatching chunks, and checks each kind of load and
-  store (integer, floating-point and compressed ones), misaligned ones over two chunks, ones through sp and the
-  ordering with older tag stores, none of which may raise an exception with memory tagging enabled in M-mode, where
-  the trap handler runs; then mismatches with MPRV, which check with S-mode's MT_MODE and tag table. U_checktag and
-  H_checktag (VS-mode, VU-mode) check the same, with mismatches, and tag loads and data accesses that fault; S_checktag
-  and H_checktag check checktag with address translation, its load page faults, guest-page faults and access faults,
-  and loads and stores, which are not checked with first-stage address translation. With the G stage only (vsatp
-  Bare), H_checktag checks that they are, with load guest-page faults of their tag loads.
+  the scalar loads and stores of data that do not use sp as the base register are checked: a mismatch raises a
+  software-check exception (xtval 4) before the access, a fault of a tag load a load access fault. A data page has its
+  tags in the tag table through the tag table base of the mode. Sm_checktag sweeps checktag between mismatching
+  chunks, and checks each kind of load and store (integer, floating-point and compressed ones), misaligned ones over
+  two chunks, ones through sp and the ordering with older tag stores, none of which may raise an exception with memory
+  tagging enabled in M-mode, where the trap handler runs; then mismatches with MPRV, which check with S-mode's MT_MODE
+  and tag table, and not with mstatus.MTAG_I = 1. U_checktag and H_checktag (VS-mode, VU-mode) check the same, with
+  mismatches, and tag loads and data accesses that fault; S_checktag and H_checktag check checktag with address
+  translation, its load page faults, guest-page faults and access faults. mstatus.MTAG_I without MPRV (S_checktag,
+  whose software-check exceptions M-mode then takes) and hstatus.MTAG_I (H_checktag) leave the loads and stores of
+  S-mode, VS-mode and VU-mode checked. With first-stage address translation, only the pages whose leaf PTE has
+  PTE.MTAG (a placeholder bit, rvtest_experimental.h) and X = 0 are tagged-data pages: S_checktag checks them, pages
+  without it, with it and X = 1, user pages (which S-mode does not check, and U-mode does, through MPRV), loads and
+  stores over two pages (with misaligned accesses performed byte by byte), also into an unmapped page, the
+  tagcheck-exempt code pages (PTE.MTAG and X = 1, also execute-only), whose instructions' loads and stores are not
+  checked, and PTE.MTAG in a non-leaf PTE (a page fault) and with memory tagging disabled (ignored); H_checktag a
+  VS-stage page with and without PTE.MTAG, VS-stage code pages with and without it, VS-stage user pages through MPRV
+  with MPV = 1, and a G-stage leaf PTE with it (a guest-page fault). With the G stage only (vsatp Bare), H_checktag
+  checks that loads and stores are checked, with load guest-page faults of their tag loads. H_checktag also checks
+  HLV and HSV in HS-mode and HU-mode, with the memory tagging and tag table of their guest mode (hstatus.SPVP, and in
+  HU-mode hstatus.VUMT_MODE), hstatus.MTAG_I and HLVX, which are not checked, and with two-stage translation, where
+  they are checked in VS-stage tagged-data pages only and their tag loads take page faults and guest-page faults.
 
 4-bit pointer tags are mandatory and 7-bit ones optional: the tests that need them are assembled only for a config
 that defines UDB_ZIMT_POINTER_TAG_WIDTH_7 (ZIMT_POINTER_TAG_WIDTH_7 in the experimental_params of test_config.yaml).
@@ -55,7 +68,9 @@ Without them, MT_MODE = 11 is reserved, and the exclusion mask bits above 15 may
 The tests enable memory tagging only around code whose other loads and stores, such as the signature's, use sp: a
 hart with tag tables (Svatag, Smvatag) checks the tags of the others. Only the settag and checktag tests set up a tag
 table. Trap handlers run in modes where memory tagging stays disabled, or with translation, whose pages without
-PTE.MTAG are not tag checked (the S-mode handlers of S_settag and S_checktag).
+PTE.MTAG are not tag checked (the S-mode handlers of S_settag and S_checktag). No test takes a trap that writes a
+nonzero mtinst or htinst while it uses a tagcheck-exempt code page or MTAG_I, whose deposit in mstatus.MTAG_I and
+hstatus.MTAG_I depends on which traps write those (transformed instructions).
 
 Each register field is swept over x0-x31 where the instruction allows it. A swept register that the framework
 uses is saved and restored around the instruction. checktag and settag write no register: the trap signature
@@ -96,6 +111,10 @@ RD_CANARY = 0xA5A5_A5A5_A5A5_A5A5
 
 MT_MODE_LSB = 34  # MT_MODE: bits 35:34 of mseccfg, menvcfg, senvcfg and henvcfg
 VUMT_MODE_LSB = 50  # hstatus.VUMT_MODE: bits 51:50
+# MTAG_I of mstatus, which with MPRV = 1 makes loads and stores unchecked, and of hstatus, which makes HLV and HSV
+# unchecked
+MSTATUS_MTAG_I_BIT = 40
+HSTATUS_MTAG_I_BIT = 10
 MT_DISABLED, MT_RESERVED, MT_TAG4, MT_TAG7 = 0b00, 0b01, 0b10, 0b11
 MT_NAMES = {MT_DISABLED: "disabled", MT_RESERVED: "reserved", MT_TAG4: "tag4", MT_TAG7: "tag7"}
 TAG_BITS = {MT_TAG4: 4, MT_TAG7: 7}  # pointer_tag_width
@@ -477,6 +496,43 @@ def _mt_mode_warl_tests(test_data: TestData, cg: str, csr: str, lsb: int = MT_MO
     return lines
 
 
+def _mtag_i_write_tests(test_data: TestData, cg: str, csr: str, bit: int, view: str | None = None) -> list[str]:
+    """Set and clear the MTAG_I bit of csr with csrs and csrc, and record it after each; while it is set, also record
+    that bit of view (sstatus, which does not include mstatus.MTAG_I) if S-mode exists."""
+    mask, val = test_data.int_regs.get_registers(2)
+
+    def record(source: str) -> list[str]:
+        return [
+            f"csrr x{val}, {source}",
+            f"srli x{val}, x{val}, {bit}",
+            f"andi x{val}, x{val}, 1",
+            write_sigupd(val, test_data),
+        ]
+
+    lines = [
+        comment_banner(
+            f"cp_mtag_i_write ({csr})",
+            f"Set and clear {csr}.MTAG_I (bit {bit}) with csrs and csrc. Record it"
+            + (f", and bit {bit} of {view} while it is set" if view else ""),
+        ),
+        f"LI(x{mask}, {1 << bit:#x})",
+        test_data.add_testcase(f"{csr}_mtag_i_set", "cp_mtag_i_write", cg),
+        f"csrs {csr}, x{mask}",
+        *record(csr),
+    ]
+    if view:
+        lines += gated(
+            [test_data.add_testcase(f"{view}_mtag_i", "cp_mtag_i_view", cg), *record(view)], "defined(S_SUPPORTED)"
+        )
+    lines += [
+        test_data.add_testcase(f"{csr}_mtag_i_clear", "cp_mtag_i_write", cg),
+        f"csrc {csr}, x{mask}",
+        *record(csr),
+    ]
+    test_data.int_regs.return_registers([mask, val])
+    return lines
+
+
 def _mtagexclude_warl_tests(test_data: TestData, cg: str, env: str) -> list[str]:
     """Write values to the exclusion mask CSRs of env and read them back.
 
@@ -851,6 +907,20 @@ def _restore(fields: list[str], masks: list[str], val: int, tmp: int) -> list[st
     for env in masks:
         lines += _write_mask(env, 0, 0, val)
     return lines
+
+
+# The M-mode CSRs of _configure and _restore
+M_MODE_CSRS = ("menvcfg", *MTAGEXCLUDE["m"], *MTAGEXCLUDE["menv"])
+
+
+def _via_tsbi(lines: list[str]) -> list[str]:
+    """lines of S-mode code, with their CSR instructions on M-mode CSRs (M_MODE_CSRS) made T-SBI calls."""
+    return [
+        tsbi_call(line)
+        if line.startswith("csr") and set(line.replace(",", " ").split()[1:]) & set(M_MODE_CSRS)
+        else line
+        for line in lines
+    ]
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1518,6 +1588,12 @@ LOAD_FAULT_GATE = f"defined({LOAD_FAULT})"
 STORE_FAULT_GATE = f"defined({STORE_FAULT})"
 # Misaligned loads and stores do not trap (the hart performs them)
 MISALIGNED_LDST_GATE = "defined(UDB_MISALIGNED_LDST)"
+# ...also over two pages: performed byte by byte (MISALIGNED_SPLIT_STRATEGY sequential_bytes), so that the access of
+# each page is translated, and a fault on the second page is reported at its first byte
+PAGE_CROSSING_GATE = "defined(UDB_MISALIGNED_LDST) && defined(UDB_MISALIGNED_SPLIT_STRATEGY_SEQUENTIAL_BYTES)"
+# The parts of the S-mode and HS-mode tests that run in M-mode (RVTEST_TSBI_GOTO_MMODE) and take traps there: a DUT
+# without standard M-mode runs the rest, and their coverpoints are in Zimt_Sm_cg, which EXCLUDE_SM drops
+STANDARD_SM_GATE = "defined(STANDARD_SM_SUPPORTED)"
 # The data chunk of the accesses that implicit tag checks do not cover, which starts a cache block of 64 bytes
 UNCHECKED_CHUNK = 52
 # Data chunk of the checktags with sp as rs1, and of the 7-bit tag with bit 7 set
@@ -1627,8 +1703,8 @@ def _check_vitt(
     table: str = TAG_TABLE,
 ) -> list[str]:
     """Set csr, a tag table base CSR, so that the tag of the chunk at base (a label, or a constant expression if not
-    label) is in the page at table (the first tag table page by default, or a constant address): csr = table - its tag
-    offset rounded down to 4 KiB. x{regs[0]} = the address of that tag."""
+    label) is in the page at table (the first tag table page by default, another one of its pages, or a constant
+    address): csr = table - its tag offset rounded down to 4 KiB. x{regs[0]} = the address of that tag."""
     tags, t1, t2 = regs
     return [
         f"LA(x{t1}, {base})" if label else load_constant(f"x{t1}", base),
@@ -1636,7 +1712,7 @@ def _check_vitt(
         f"srli x{t2}, x{t1}, 12",
         f"slli x{t2}, x{t2}, 12",
         f"sub x{t1}, x{t1}, x{t2}",
-        f"LA(x{tags}, {table})" if table == TAG_TABLE else load_constant(f"x{tags}", table),
+        f"LA(x{tags}, {table})" if table.startswith(TAG_TABLE) else load_constant(f"x{tags}", table),
         f"sub x{t2}, x{tags}, x{t2}",
         f"csrw {csr}, x{t2}",
         f"add x{tags}, x{tags}, x{t1}",
@@ -2042,8 +2118,9 @@ def _unchecked_access_tests(
     """Loads and stores that implicit tag checks do not cover, of data chunk UNCHECKED_CHUNK, whose tag is GOOD_TAG,
     with a pointer tag that does not match: LR/SC and an AMO through a pointer with BAD_TAG and, in M-mode, CMOs and
     HLV/HSV through one without a pointer tag (pointer masking need not apply to them), and vector loads and stores
-    (unit-stride, strided, indexed and masked, element 0 masked off) with BAD_TAG. No exception. Record the loaded
-    values and memory."""
+    (unit-stride, strided, indexed and masked, element 0 masked off) with BAD_TAG. HLV/HSV are checked with the
+    memory tagging of their guest mode, not M-mode's: VU-mode's (hstatus.SPVP = 0), senvcfg.MT_MODE, which stays
+    disabled here. No exception. Record the loaded values and memory."""
     name = MT_NAMES[mt_mode]
     mt_on, mt_off = mt
     ptr, val, tmp, save = test_data.int_regs.get_registers(4)
@@ -2061,7 +2138,11 @@ def _unchecked_access_tests(
             f"cp_unchecked_access ({mode}, {name})",
             f"In {mode}-mode with {TAG_BITS[mt_mode]}-bit tags, accesses that implicit tag checks do not cover, with a\n"
             "pointer tag that does not match: LR/SC and an AMO"
-            + (", CMOs, HLV/HSV and vector loads and stores" if m_mode else "")
+            + (
+                ", CMOs, HLV/HSV (whose VU-mode memory\ntagging is disabled) and vector loads and stores"
+                if m_mode
+                else ""
+            )
             + ". No exception. Record\nthe loaded values and memory",
         ),
         *gated(
@@ -2099,7 +2180,8 @@ def _unchecked_access_tests(
                 ],
                 "defined(ZICBOZ_SUPPORTED)",
             ),
-            # V-mode loads and stores with Bare translation (vsatp and hgatp) in the VU-mode of hstatus.SPVP = 0
+            # V-mode loads and stores with Bare translation (vsatp and hgatp) in the VU-mode of hstatus.SPVP = 0, whose
+            # memory tagging (senvcfg.MT_MODE) is disabled: M-mode's does not apply to them
             *gated(
                 [
                     "csrw CSR_VSATP, x0",
@@ -2288,8 +2370,8 @@ def _checktag_sweep_tests(test_data: TestData, cg: str, mt_mode: int) -> list[st
 
 def _m_checked_mprv_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
     """Loads and stores in M-mode with mstatus.MPRV = 1 and MPP = S, checked with the MT_MODE (menvcfg) and tag table
-    (svitts) of S-mode, whose address translation is Bare, while mseccfg.MT_MODE = 00; and checktag, which uses those
-    of M-mode."""
+    (svitts) of S-mode, whose address translation is Bare, while mseccfg.MT_MODE = 00, and not checked with
+    mstatus.MTAG_I = 1; and checktag, which uses those of M-mode."""
     name = MT_NAMES[mt_mode]
     ptr, val, tmp, mprv, save = test_data.int_regs.get_registers(5)
     mt = f"{mt_mode << MT_MODE_LSB:#x}"
@@ -2304,10 +2386,11 @@ def _m_checked_mprv_tests(test_data: TestData, cg: str, mt_mode: int) -> list[st
 
     lines = [
         comment_banner(
-            f"cp_checked_mprv, cp_checktag_mprv (M, {name})",
+            f"cp_checked_mprv, cp_checked_mprv_mtag_i, cp_checktag_mprv (M, {name})",
             f"In M-mode with mstatus.MPRV = 1 and MPP = S, and {TAG_BITS[mt_mode]}-bit tags in S-mode (menvcfg.MT_MODE,\n"
             "svitts) and memory tagging disabled in M-mode: a load with the matching pointer tag, and a load and a\n"
-            f"store with a mismatching one: {SW_CHECK_TEXT}, which M-mode takes. checktag uses\n"
+            f"store with a mismatching one: {SW_CHECK_TEXT}, which M-mode takes; with\n"
+            "mstatus.MTAG_I = 1 too, a load and a store with a mismatching one: no check. checktag uses\n"
             "M-mode's MT_MODE: no check. Then with memory tagging enabled in M-mode only: no check of a load and a\n"
             "store with a mismatching pointer tag, and checktag with the matching one. Record rd and memory",
         ),
@@ -2333,6 +2416,15 @@ def _m_checked_mprv_tests(test_data: TestData, cg: str, mt_mode: int) -> list[st
         f"LI(x{val}, 0x0123456789abcdef)",
         *with_mprv("store_match", "cp_checked_mprv", f"sd x{val}, 8(x{save})"),
         *_record_via_sp(test_data, ptr, 8, val, save),
+        # mstatus.MTAG_I = 1, set and cleared with MPRV: not checked
+        f"LI(x{mprv}, MSTATUS_MPRV | {1 << 11:#x} | {1 << MSTATUS_MTAG_I_BIT:#x})    # MPP = S, MTAG_I",
+        f"LI(x{val}, {RD_CANARY:#x})",
+        *with_mprv("mtag_i", "cp_checked_mprv_mtag_i", f"ld x{val}, 0(x{ptr})"),
+        write_sigupd(val, test_data),
+        f"LI(x{val}, 0xfedcba9876543210)",
+        *with_mprv("mtag_i_store", "cp_checked_mprv_mtag_i", f"sd x{val}, 0(x{ptr})"),
+        *_record_via_sp(test_data, ptr, 0, val, save),
+        f"LI(x{mprv}, MSTATUS_MPRV | {1 << 11:#x})    # MPP = S",
         *with_mprv("checktag_m_disabled", "cp_checktag_mprv", f"checktag x{ptr}, 0"),
         # Memory tagging enabled in M-mode only
         f"LI(x{tmp}, {mt})",
@@ -2362,17 +2454,19 @@ def _m_checked_mprv_tests(test_data: TestData, cg: str, mt_mode: int) -> list[st
 def _m_checked_mprv_v_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
     """Loads and stores in M-mode with mstatus.MPRV = 1 and MPV = 1, checked with the MT_MODE and tag table of VS-mode
     (MPP = S: henvcfg, vsvitts) or VU-mode (MPP = U: senvcfg, vsvittu), whose address translation (vsatp and hgatp)
-    is Bare, while mseccfg.MT_MODE = 00 and the tag tables of S-mode and U-mode (svitts, svittu) are 0."""
+    is Bare, while mseccfg.MT_MODE = 00 and the tag tables of S-mode and U-mode (svitts, svittu) are 0, and not
+    checked with mstatus.MTAG_I = 1."""
     name = MT_NAMES[mt_mode]
     ptr, val, tmp, mprv, save = test_data.int_regs.get_registers(5)
     mt = f"{mt_mode << MT_MODE_LSB:#x}"
     lines = [
         comment_banner(
-            f"cp_checked_mprv_v (M, {name})",
+            f"cp_checked_mprv_v, cp_checked_mprv_v_mtag_i (M, {name})",
             f"In M-mode with mstatus.MPRV = 1, MPV = 1 and MPP = S, and {TAG_BITS[mt_mode]}-bit tags in VS-mode\n"
             "(henvcfg.MT_MODE, vsvitts), then MPP = U with them in VU-mode (senvcfg.MT_MODE, vsvittu), and Bare\n"
             "translation: a load and a store with the matching pointer tag, and with a mismatching one: "
-            f"{SW_CHECK_TEXT},\nwhich M-mode takes with GVA = 0. Record rd and memory",
+            f"{SW_CHECK_TEXT},\nwhich M-mode takes with GVA = 0; with mstatus.MTAG_I = 1 too, a load and a store with\n"
+            "a mismatching one: no check. Record rd and memory",
         ),
         "csrw CSR_VSATP, x0",
         "csrw CSR_HGATP, x0",
@@ -2381,14 +2475,17 @@ def _m_checked_mprv_v_tests(test_data: TestData, cg: str, mt_mode: int) -> list[
     ]
     for vmode, mpp, env, csr in (("VS", 1, "CSR_HENVCFG", "CSR_VSVITTS"), ("VU", 0, "CSR_SENVCFG", "CSR_VSVITTU")):
 
-        def with_mprv(case: str, instruction: str, vmode: str = vmode) -> list[str]:
+        def with_mprv(
+            case: str, instruction: str, vmode: str = vmode, coverpoint: str = "cp_checked_mprv_v"
+        ) -> list[str]:
             return [
                 f"csrs mstatus, x{mprv}",
-                test_data.add_testcase(f"M_{name}_mprv_{vmode.lower()}_{case}", "cp_checked_mprv_v", cg),
+                test_data.add_testcase(f"M_{name}_mprv_{vmode.lower()}_{case}", coverpoint, cg),
                 instruction,
                 f"csrc mstatus, x{mprv}",
             ]
 
+        mpv = f"MSTATUS_MPRV | MSTATUS_MPV | {mpp << 11:#x}"
         lines += [
             *_check_vitt(csr, mt_mode, (mprv, tmp, val)),
             *_set_pmm(tmp, "SSNPM"),
@@ -2397,7 +2494,7 @@ def _m_checked_mprv_v_tests(test_data: TestData, cg: str, mt_mode: int) -> list[
             f"csrs {env}, x{tmp}",
             f"LI(x{tmp}, MSTATUS_MPP)",
             f"csrc mstatus, x{tmp}",
-            f"LI(x{mprv}, MSTATUS_MPRV | MSTATUS_MPV | {mpp << 11:#x})    # MPP = {'S' if mpp else 'U'}",
+            f"LI(x{mprv}, {mpv})    # MPP = {'S' if mpp else 'U'}",
             *_check_pointer(ptr, tmp, mt_mode, 3, GOOD_TAG[mt_mode]),
             f"LI(x{val}, {RD_CANARY:#x})",
             *with_mprv("match", f"ld x{val}, 0(x{ptr})"),
@@ -2411,11 +2508,61 @@ def _m_checked_mprv_v_tests(test_data: TestData, cg: str, mt_mode: int) -> list[
             write_sigupd(val, test_data),
             *with_mprv("store_mismatch", f"sd x{val}, 0(x{ptr})"),
             *_record_via_sp(test_data, ptr, 0, val, save),
+            # mstatus.MTAG_I = 1, set and cleared with MPRV: not checked
+            f"LI(x{mprv}, {mpv} | {1 << MSTATUS_MTAG_I_BIT:#x})    # MTAG_I",
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *with_mprv("mtag_i", f"ld x{val}, 0(x{ptr})", coverpoint="cp_checked_mprv_v_mtag_i"),
+            write_sigupd(val, test_data),
+            f"LI(x{val}, 0xfedcba9876543210)",
+            *with_mprv("mtag_i_store", f"sd x{val}, 0(x{ptr})", coverpoint="cp_checked_mprv_v_mtag_i"),
+            *_record_via_sp(test_data, ptr, 0, val, save),
             f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
             f"csrc {env}, x{tmp}",
             f"csrw {csr}, x0",
         ]
     test_data.int_regs.return_registers([ptr, val, tmp, mprv, save])
+    return lines
+
+
+def _s_mtag_i_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
+    """In S-mode with Bare translation and memory tagging enabled, mstatus.MTAG_I = 1, which makes only the loads and
+    stores of M-mode with mstatus.MPRV = 1 unchecked: a load and a store with a mismatching pointer tag raise a
+    software-check exception. M-mode takes it (medeleg[18] = 0), as the trap handler of S-mode would be tag checked,
+    and its trap handler reads the trapping instruction with MPRV = 1 and MPP = S, which MTAG_I makes unchecked (S-mode
+    otherwise takes no exception with memory tagging and Bare translation)."""
+    name = MT_NAMES[mt_mode]
+    ptr, val, tmp, save, deleg = test_data.int_regs.get_registers(5)
+    mtag_i = f"{1 << MSTATUS_MTAG_I_BIT:#x}"
+    lines = [
+        comment_banner(
+            f"cp_checked_mtag_i (S, {name})",
+            "In S-mode with Bare translation and mstatus.MTAG_I = 1, which only affects loads and stores with\n"
+            f"mstatus.MPRV = 1: a load and a store with a mismatching pointer tag: {SW_CHECK_TEXT},\n"
+            "which M-mode takes (medeleg[18] = 0). Record rd and memory",
+        ),
+        "RVTEST_TSBI_GOTO_MMODE",
+        f"csrr x{deleg}, medeleg",
+        f"LI(x{tmp}, {1 << SW_CHECK:#x})",
+        f"csrc medeleg, x{tmp}",
+        f"LI(x{tmp}, {mtag_i})",
+        f"csrs mstatus, x{tmp}",
+        "RVTEST_TSBI_GOTO_SMODE",
+        *_check_pointer(ptr, tmp, mt_mode, 3, BAD_TAG[mt_mode]),
+        f"LI(x{val}, {RD_CANARY:#x})",
+        test_data.add_testcase(f"S_{name}_mtag_i_load", "cp_checked_mtag_i", cg),
+        f"ld x{val}, 0(x{ptr})",
+        write_sigupd(val, test_data),
+        f"LI(x{val}, 0xfedcba9876543210)",
+        test_data.add_testcase(f"S_{name}_mtag_i_store", "cp_checked_mtag_i", cg),
+        f"sd x{val}, 0(x{ptr})",
+        *_record_via_sp(test_data, ptr, 0, val, save),
+        "RVTEST_TSBI_GOTO_MMODE",
+        f"LI(x{tmp}, {mtag_i})",
+        f"csrc mstatus, x{tmp}",
+        f"csrw medeleg, x{deleg}",
+        "RVTEST_TSBI_GOTO_SMODE",
+    ]
+    test_data.int_regs.return_registers([ptr, val, tmp, save, deleg])
     return lines
 
 
@@ -2490,8 +2637,8 @@ def _s_checktag_case(
 
 def _s_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
     """checktag in S-mode with Sv39 translation and memory tagging enabled with mt_mode (menvcfg.MT_MODE), whose tags
-    cross from the first tag table page into the second one; then loads and stores, which are not tag checked with
-    address translation. The S-mode trap handler takes the exceptions."""
+    cross from the first tag table page into the second one; then loads and stores of a page without PTE.MTAG, which
+    are not tag checked. The S-mode trap handler takes the exceptions."""
     name = MT_NAMES[mt_mode]
     a, b, c = test_data.int_regs.get_registers(3)
     regs = (a, b, c)
@@ -2616,8 +2763,9 @@ def _s_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
         *svitts(hex(SETTAG_VA)),
         comment_banner(
             f"cp_checked_translated (S, {name})",
-            "With address translation, loads and stores are not tag checked: a load and a store of the first tag\n"
-            "table page through SETTAG_VA with a mismatching pointer tag, whose tags are not mapped. Record both",
+            "With address translation, loads and stores of a page without PTE.MTAG are not tag checked: a load and a\n"
+            "store of the first tag table page through SETTAG_VA with a mismatching pointer tag, whose tags are not\n"
+            "mapped. Record both",
         ),
         *second_page(PteFlags(execute=False), f"{TAG_TABLE} + 0x1000"),
         f"LI(x{b}, {_tag_field(BAD_TAG[mt_mode], mt_mode) | (SETTAG_VA + 0x800):#x})",
@@ -2635,6 +2783,408 @@ def _s_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
         tsbi_call(f"csrc menvcfg, x{a}"),
     ]
     test_data.int_regs.return_registers(list(regs))
+    return lines
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Implicit tag checks with first-stage paging: PTE.MTAG
+# ---------------------------------------------------------------------------------------------------------------
+
+# PTE.MTAG (rvtest_experimental.h): with first-stage paging, a leaf PTE with it and X = 0 maps a tagged-data page,
+# whose loads and stores are tag checked, and one with it and X = 1 a tagcheck-exempt code page, whose instructions'
+# loads and stores are not. A load or store over two pages checks both if either is a tagged-data page, and a supervisor
+# access does not check user pages. PTE.MTAG is reserved in non-leaf PTEs and in G-stage PTEs, and ignored with memory
+# tagging disabled.
+PTE_MTAG = "PTE_MTAG"
+
+
+class _MtagPage(NamedTuple):
+    """A 4 KiB page of the S-mode tests with PTE.MTAG, at MTAG_PAGE_VA + 4 KiB * slot."""
+
+    slot: int
+    flags: PteFlags
+    physical: str  # a label expression
+
+
+# The pages of the S-mode tests with Sv39 and PTE.MTAG are in the 2 MiB region of SETTAG_VA, whose level-0 page table
+# also maps the tag table pages of the checktag tests. MTAG_PAGE_VA is a multiple of 128 KiB, so the tag table base that
+# puts the tags of their chunks at the start of the tags page is a multiple of 4 KiB with both tag widths. The data
+# pages map MTAG_DATA, the code pages the first or the second page of MTAG_CODE. Zimt_coverage.svh identifies the pages
+# by their slots.
+MTAG_PAGE_VA = SETTAG_VA + 0x2_0000
+MTAG_DATA = "zimt_mtag_data"
+MTAG_TAGS = "zimt_mtag_tags"
+MTAG_CODE = "zimt_mtag_code"
+MTAG_TAGGED_FLAGS = PteFlags(execute=False, extra=(PTE_MTAG,))
+MTAG_EXEMPT_FLAGS = PteFlags(write=False, extra=(PTE_MTAG,))
+MTAG_PAGES = {
+    # A tagged-data page; one without PTE.MTAG after it; a user tagged-data page, which supervisor accesses do not
+    # check; a tagged-data page after it; and one with PTE.MTAG and X = 1, a tagcheck-exempt code page
+    "tagged": _MtagPage(0, MTAG_TAGGED_FLAGS, MTAG_DATA),
+    "untagged": _MtagPage(1, PteFlags(execute=False), MTAG_DATA),
+    "user": _MtagPage(2, PteFlags(user=True, execute=False, extra=(PTE_MTAG,)), MTAG_DATA),
+    "tagged_after_user": _MtagPage(3, MTAG_TAGGED_FLAGS, MTAG_DATA),
+    "executable": _MtagPage(4, PteFlags(extra=(PTE_MTAG,)), MTAG_DATA),
+    "tags": _MtagPage(5, PteFlags(execute=False), MTAG_TAGS),
+    # A tagged-data page before slot 7, which is not mapped
+    "tagged_before_unmapped": _MtagPage(6, MTAG_TAGGED_FLAGS, MTAG_DATA),
+    # The first code page tagcheck-exempt, followed by the second one without PTE.MTAG; both tagcheck-exempt; and the
+    # first one without PTE.MTAG
+    "exempt": _MtagPage(8, MTAG_EXEMPT_FLAGS, MTAG_CODE),
+    "normal_after_exempt": _MtagPage(9, PteFlags(write=False), f"{MTAG_CODE} + 0x1000"),
+    "exempt2": _MtagPage(10, MTAG_EXEMPT_FLAGS, MTAG_CODE),
+    "exempt_after_exempt": _MtagPage(11, MTAG_EXEMPT_FLAGS, f"{MTAG_CODE} + 0x1000"),
+    "normal_code": _MtagPage(12, PteFlags(write=False), MTAG_CODE),
+    # The first code page tagcheck-exempt and execute-only (R = 0)
+    "exempt_execute_only": _MtagPage(13, PteFlags(read=False, write=False, extra=(PTE_MTAG,)), MTAG_CODE),
+    # A user page without PTE.MTAG
+    "user_untagged": _MtagPage(14, PteFlags(user=True, execute=False), MTAG_DATA),
+    # The tags page again, as a user page, for the tag loads of U-mode
+    "user_tags": _MtagPage(15, PteFlags(user=True, execute=False), MTAG_TAGS),
+}
+# The data pages again, behind a level-1 non-leaf PTE with PTE.MTAG, 4 MiB above
+MTAG_NONLEAF_VA = MTAG_PAGE_VA + 0x40_0000
+# Entry points of MTAG_CODE, each followed by a return through the third register of the code: a load into the second
+# register and a store of it through the first one, a checktag of the first one, and a load at the end of its first
+# page, which straddles its two pages
+MTAG_CODE_LOAD, MTAG_CODE_STORE, MTAG_CODE_CHECKTAG, MTAG_CODE_STRADDLE = 0x0, 0x8, 0x10, 0xFFE
+
+
+def _mtag_va(page: str, offset: int = 0) -> int:
+    """The virtual address of offset in page of MTAG_PAGES."""
+    return MTAG_PAGE_VA + 0x1000 * MTAG_PAGES[page].slot + offset
+
+
+def _mtag_pointer(page: str, offset: int, tag: int, mt_mode: int) -> int:
+    """A pointer to offset in page with the pointer tag tag."""
+    return _tag_field(tag, mt_mode) | _mtag_va(page, offset)
+
+
+def _mtag_tag(page: str, offset: int, tag: int, mt_mode: int, regs: tuple[int, int]) -> list[str]:
+    """Set the memory tag of the chunk at offset in page to tag, through the identity mapping of MTAG_TAGS. With 4-bit
+    tags, the other chunk of its tag byte gets it too."""
+    addr, val = regs
+    byte = _tag_offset((_mtag_va(page, offset) - MTAG_PAGE_VA) >> 4, mt_mode)
+    return [
+        f"LA(x{addr}, {MTAG_TAGS} + {byte:#x})",
+        f"LI(x{val}, {tag if mt_mode == MT_TAG7 else tag * 0x11:#x})",
+        f"sb x{val}, 0(x{addr})",
+    ]
+
+
+def _mtag_mapping(test_data: TestData) -> list[str]:
+    """Map the pages of MTAG_PAGES, and MTAG_NONLEAF_VA through a level-1 non-leaf PTE with PTE.MTAG that points to
+    their level-0 page table. The checktag tests wrote the non-leaf PTEs above that table for SETTAG_VA."""
+    a, b, c = test_data.int_regs.get_registers(3)
+    regs = (a, b, c)
+    lines = [
+        comment_banner(
+            "PTE.MTAG pages",
+            f"Map the pages of the PTE.MTAG tests from {MTAG_PAGE_VA:#x}, and the data pages again behind a level-1\n"
+            f"non-leaf PTE with PTE.MTAG from {MTAG_NONLEAF_VA:#x}",
+        ),
+    ]
+    for page in MTAG_PAGES.values():
+        lines += write_pte(
+            SV39,
+            level=0,
+            flags=page.flags,
+            virtual_address=hex(MTAG_PAGE_VA + 0x1000 * page.slot),
+            physical_address=page.physical,
+            regs=regs,
+        )
+    lines += [
+        *write_pte(
+            SV39,
+            level=1,
+            flags=PteFlags.nonleaf(PTE_MTAG),
+            virtual_address=hex(MTAG_NONLEAF_VA),
+            physical_address=SV39.page_table_label(0),
+            regs=regs,
+        ),
+        "sfence.vma",
+    ]
+    test_data.int_regs.return_registers(list(regs))
+    return lines
+
+
+def _mtag_data(code: tuple[int, int, int]) -> list[str]:
+    """The pages of the PTE.MTAG tests, once per file: the data page, with the pattern of the check data where the tests
+    access it (its first 80 bytes and last 16), the tags page, and the two code pages of MTAG_CODE, whose instructions
+    use the registers code (pointer, value, return address)."""
+    ptr, val, ret = code
+    return [
+        f".ifndef {MTAG_DATA}",
+        ".p2align 12",
+        f"{MTAG_DATA}:",
+        *[f".dword {_check_data_dword(chunk, dword):#018x}" for chunk in range(5) for dword in range(2)],
+        f".skip {0x1000 - 80 - 16}",
+        *[f".dword {_check_data_dword(255, dword):#018x}" for dword in range(2)],
+        f"{MTAG_TAGS}:",
+        ".skip 0x1000",
+        f"{MTAG_CODE}:",
+        ".option push",
+        ".option norvc",
+        f"ld x{val}, 0(x{ptr})",
+        f"jalr x0, 0(x{ret})",
+        f"sd x{val}, 0(x{ptr})",
+        f"jalr x0, 0(x{ret})",
+        f"checktag x{ptr}, 0",
+        f"jalr x0, 0(x{ret})",
+        f".skip {MTAG_CODE_STRADDLE - 0x18}",
+        f"ld x{val}, 0(x{ptr})",
+        f"jalr x0, 0(x{ret})",
+        ".option pop",
+        f".skip {0x2000 - MTAG_CODE_STRADDLE - 8}",
+        ".endif",
+    ]
+
+
+def _s_mtag_tests(test_data: TestData, cg: str, mt_mode: int, code: tuple[int, int, int]) -> list[str]:
+    """Loads and stores in S-mode with Sv39 and memory tagging enabled with mt_mode, of the pages of MTAG_PAGES, whose
+    tags svitts puts in the tags page: checked in a tagged-data page, not in a page with PTE.MTAG and X = 1 nor, with
+    sstatus.SUM = 1, in a user tagged-data page; over two pages (with hardware misaligned loads and stores), checked in
+    both if either is a supervisor tagged-data page; and not from a tagcheck-exempt code page, while checktag is. With
+    4-bit tags also PTE.MTAG in a non-leaf PTE, and in a leaf PTE with memory tagging disabled. The S-mode trap handler,
+    whose loads and stores are of pages without PTE.MTAG, takes the exceptions. code holds the registers of MTAG_CODE."""
+    name = MT_NAMES[mt_mode]
+    ptr, val, ret = code
+    addr, tmp = test_data.int_regs.get_registers(2)
+    good, bad = GOOD_TAG[mt_mode], BAD_TAG[mt_mode]
+
+    def tag(page: str, offset: int, value: int) -> list[str]:
+        return _mtag_tag(page, offset, value, mt_mode, (addr, tmp))
+
+    def load(case: str, coverpoint: str, page: str, offset: int, pointer_tag: int) -> list[str]:
+        """ptr = a pointer to offset in page with pointer_tag; a load from it into val, which holds RD_CANARY before.
+        Record val."""
+        return [
+            f"LI(x{ptr}, {_mtag_pointer(page, offset, pointer_tag, mt_mode):#x})",
+            f"LI(x{val}, {RD_CANARY:#x})",
+            test_data.add_testcase(f"S_{name}_{case}", coverpoint, cg),
+            f"ld x{val}, 0(x{ptr})",
+            write_sigupd(val, test_data),
+        ]
+
+    def store(case: str, coverpoint: str, value: int, disp: int = 8) -> list[str]:
+        """A store of value to ptr + disp."""
+        return [
+            f"LI(x{val}, {value:#x})",
+            test_data.add_testcase(f"S_{name}_{case}", coverpoint, cg),
+            f"sd x{val}, {disp}(x{ptr})",
+        ]
+
+    def record(offset: int) -> list[str]:
+        """Record the doubleword at offset in MTAG_DATA, through the identity mapping."""
+        return [f"LA(x{addr}, {MTAG_DATA} + {offset:#x})", f"ld x{tmp}, 0(x{addr})", write_sigupd(tmp, test_data)]
+
+    def call(case: str, coverpoint: str, page: str, entry: int, value: int = RD_CANARY) -> list[str]:
+        """Call entry of the code page page, with val = value."""
+        return [
+            f"LI(x{val}, {value:#x})",
+            f"LI(x{tmp}, {_mtag_va(page, entry):#x})",
+            test_data.add_testcase(f"S_{name}_{case}", coverpoint, cg),
+            f"jalr x{ret}, 0(x{tmp})",
+        ]
+
+    sum_on = [f"LI(x{tmp}, SSTATUS_SUM)", f"csrs sstatus, x{tmp}"]
+    sum_off = [f"LI(x{tmp}, SSTATUS_SUM)", f"csrc sstatus, x{tmp}"]
+    lines = [
+        comment_banner(
+            f"cp_checked_tagged_page, cp_unchecked_page (S, {name})",
+            f"In S-mode with Sv39, {TAG_BITS[mt_mode]}-bit tags and svitts putting the tags of the PTE.MTAG pages in\n"
+            "their tags page: a load and a store of a tagged-data page (PTE.MTAG = 1, X = 0) with a mismatching\n"
+            f"pointer tag: {SW_CHECK_TEXT}; with the matching one: performed. With a\n"
+            "mismatching one, of a page with PTE.MTAG = 1 and X = 1, and (sstatus.SUM = 1) of a user tagged-data\n"
+            "page: not checked. Record rd and memory",
+        ),
+        f"LI(x{tmp}, {_extended_vitt(_mtag_va('tags'), MTAG_PAGE_VA, mt_mode):#x})",
+        f"csrw CSR_SVITTS, x{tmp}",
+        *_set_pmm(tmp, "SMNPM"),
+        f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
+        f"or x{tmp}, x{tmp}, x{addr}",
+        tsbi_call(f"csrs menvcfg, x{tmp}"),
+        *tag("tagged", 0x10, good),
+        *load("tagged_load_mismatch", "cp_checked_tagged_page", "tagged", 0x10, bad),
+        *store("tagged_store_mismatch", "cp_checked_tagged_page", 0xFEDC_BA98_7654_3210),
+        *record(0x18),
+        *load("tagged_load_match", "cp_checked_tagged_page", "tagged", 0x10, good),
+        *store("tagged_store_match", "cp_checked_tagged_page", 0x0123_4567_89AB_CDEF),
+        *record(0x18),
+        *tag("executable", 0x20, good),
+        *load("executable_load", "cp_unchecked_page", "executable", 0x20, bad),
+        *store("executable_store", "cp_unchecked_page", 0x1111_2222_3333_4444),
+        *record(0x28),
+        *sum_on,
+        *tag("user", 0x20, good),
+        *load("user_load", "cp_unchecked_page", "user", 0x20, bad),
+        *store("user_store", "cp_unchecked_page", 0x5555_6666_7777_8888),
+        *sum_off,
+        *record(0x28),
+    ]
+    if mt_mode == MT_TAG4:
+        lines += [
+            comment_banner(
+                "cp_mtag_nonleaf, cp_mtag_mt_disabled (S)",
+                "A load and a store of the tagged-data page behind a level-1 non-leaf PTE with PTE.MTAG, which is\n"
+                "reserved there: a load page fault and a store/AMO page fault. Then with memory tagging disabled\n"
+                "(menvcfg.MT_MODE = 00), which ignores PTE.MTAG, a load and a store of the tagged-data page with a\n"
+                "mismatching pointer tag: performed. Record rd and memory",
+            ),
+            f"LI(x{ptr}, {MTAG_NONLEAF_VA + 0x1000 * MTAG_PAGES['tagged'].slot + 0x10:#x})",
+            f"LI(x{val}, {RD_CANARY:#x})",
+            test_data.add_testcase("S_nonleaf_load", "cp_mtag_nonleaf", cg),
+            f"ld x{val}, 0(x{ptr})",
+            write_sigupd(val, test_data),
+            test_data.add_testcase("S_nonleaf_store", "cp_mtag_nonleaf", cg),
+            f"sd x{val}, 8(x{ptr})",
+            f"LI(x{tmp}, {0b11 << MT_MODE_LSB:#x})",
+            tsbi_call(f"csrc menvcfg, x{tmp}"),
+            *load("mt_disabled_load", "cp_mtag_mt_disabled", "tagged", 0x10, bad),
+            *store("mt_disabled_store", "cp_mtag_mt_disabled", 0x9999_AAAA_BBBB_CCCC),
+            *record(0x18),
+            f"LI(x{tmp}, {mt_mode << MT_MODE_LSB:#x})",
+            tsbi_call(f"csrs menvcfg, x{tmp}"),
+        ]
+    lines += gated(
+        [
+            comment_banner(
+                f"cp_checked_straddle, cp_unchecked_straddle, cp_checked_straddle_fault (S, {name})",
+                "Loads and stores over two pages: of a tagged-data page and a page without PTE.MTAG, which checks both,\n"
+                "with the chunk in the second page mismatching, then matching; (sstatus.SUM = 1) of a user tagged-data\n"
+                "page and a tagged-data page, which checks only the second one, with the chunk in the first page\n"
+                "mismatching, then also the one in the second page; of a page without PTE.MTAG and a user\n"
+                f"tagged-data page, which checks neither, with both mismatching: none, or a {SW_CHECK_TEXT}\n"
+                "with no byte stored; and of the tags page, without PTE.MTAG, and a tagged-data page, which checks both,\n"
+                "with the chunk in the first page mismatching, then matching. A load over a tagged-data page, with its\n"
+                "chunk mismatching, and an unmapped page: the load page fault of the second page, at its first byte,\n"
+                "as the check needs both pages. Record rd and memory",
+            ),
+            *tag("tagged", 0xFF0, good),
+            *tag("untagged", 0x000, bad),
+            *load("straddle_tagged_untagged_mismatch", "cp_checked_straddle", "tagged", 0xFFC, good),
+            *store("straddle_tagged_untagged_store_mismatch", "cp_checked_straddle", 0xFEDC_BA98_7654_3210, 0),
+            *record(0xFF8),
+            *record(0x000),
+            *tag("untagged", 0x000, good),
+            *load("straddle_tagged_untagged", "cp_checked_straddle", "tagged", 0xFFC, good),
+            *store("straddle_tagged_untagged_store", "cp_checked_straddle", 0x0123_4567_89AB_CDEF, 0),
+            *record(0xFF8),
+            *record(0x000),
+            *sum_on,
+            *tag("user", 0xFF0, bad),
+            *tag("tagged_after_user", 0x000, good),
+            *load("straddle_user_tagged", "cp_checked_straddle", "user", 0xFFC, good),
+            *tag("tagged_after_user", 0x000, bad),
+            *load("straddle_user_tagged_mismatch", "cp_checked_straddle", "user", 0xFFC, good),
+            *tag("untagged", 0xFF0, bad),
+            *tag("user", 0x000, bad),
+            *load("straddle_untagged_user", "cp_unchecked_straddle", "untagged", 0xFFC, good),
+            *sum_off,
+            *tag("tags", 0xFF0, bad),
+            *tag("tagged_before_unmapped", 0x000, good),
+            *load("straddle_untagged_tagged_mismatch", "cp_checked_straddle", "tags", 0xFFC, good),
+            *store("straddle_untagged_tagged_store_mismatch", "cp_checked_straddle", 0x2468_ACE0_1357_9BDF, 0),
+            f"LA(x{addr}, {MTAG_TAGS} + 0xFF8)",
+            f"ld x{tmp}, 0(x{addr})",
+            write_sigupd(tmp, test_data),
+            *record(0x000),
+            *tag("tags", 0xFF0, good),
+            *load("straddle_untagged_tagged", "cp_checked_straddle", "tags", 0xFFC, good),
+            *tag("tagged_before_unmapped", 0xFF0, bad),
+            *load("straddle_unmapped", "cp_checked_straddle_fault", "tagged_before_unmapped", 0xFFC, good),
+        ],
+        PAGE_CROSSING_GATE,
+    )
+    lines += [
+        comment_banner(
+            f"cp_mtag_code_access, cp_mtag_code_checktag, cp_mtag_code_straddle (S, {name})",
+            "Through a pointer with a mismatching tag to the tagged-data page: a load and a store from a\n"
+            "tagcheck-exempt code page (PTE.MTAG = 1, X = 1): not checked; checktag from it: a software-check\n"
+            "exception; the same load and store from a code page without PTE.MTAG: checked, and from an\n"
+            "execute-only tagcheck-exempt code page (R = 0): not checked. Then (Zca) the load at the end of the first\n"
+            "code page, which straddles it and the next one: checked if that one has no PTE.MTAG, not if it is\n"
+            "tagcheck-exempt too. Record rd and memory",
+        ),
+        *tag("tagged", 0x30, good),
+        f"LI(x{ptr}, {_mtag_pointer('tagged', 0x30, bad, mt_mode):#x})",
+        *call("exempt_load", "cp_mtag_code_access", "exempt", MTAG_CODE_LOAD),
+        write_sigupd(val, test_data),
+        *call("exempt_store", "cp_mtag_code_access", "exempt", MTAG_CODE_STORE, 0x1357_9BDF_0246_8ACE),
+        *record(0x30),
+        *call("exempt_checktag", "cp_mtag_code_checktag", "exempt", MTAG_CODE_CHECKTAG),
+        *call("normal_code_load", "cp_mtag_code_access", "normal_code", MTAG_CODE_LOAD),
+        write_sigupd(val, test_data),
+        *call("normal_code_store", "cp_mtag_code_access", "normal_code", MTAG_CODE_STORE, 0x0246_8ACE_1357_9BDF),
+        *record(0x30),
+        *call("exempt_execute_only_load", "cp_mtag_code_access", "exempt_execute_only", MTAG_CODE_LOAD),
+        write_sigupd(val, test_data),
+        *call(
+            "exempt_execute_only_store",
+            "cp_mtag_code_access",
+            "exempt_execute_only",
+            MTAG_CODE_STORE,
+            0x0F1E_2D3C_4B5A_6978,
+        ),
+        *record(0x30),
+        *gated(
+            [
+                *call("straddle_exempt_normal", "cp_mtag_code_straddle", "exempt", MTAG_CODE_STRADDLE),
+                write_sigupd(val, test_data),
+                *call("straddle_exempt_exempt", "cp_mtag_code_straddle", "exempt2", MTAG_CODE_STRADDLE),
+                write_sigupd(val, test_data),
+            ],
+            "defined(ZCA_SUPPORTED)",
+        ),
+        f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
+        tsbi_call(f"csrc menvcfg, x{tmp}"),
+    ]
+
+    def mprv_u_load(case: str, page: str, pointer_tag: int) -> list[str]:
+        """In M-mode, a load with mstatus.MPRV = 1 and MPP = U from offset 0x40 in page with pointer_tag. Record rd."""
+        return [
+            f"LI(x{ptr}, {_mtag_pointer(page, 0x40, pointer_tag, mt_mode):#x})",
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, MSTATUS_MPP)",
+            f"csrc mstatus, x{tmp}",
+            f"LI(x{tmp}, MSTATUS_MPRV)",
+            f"csrs mstatus, x{tmp}",
+            test_data.add_testcase(f"M_{name}_{case}", "cp_checked_mprv_u_page", "Zimt_Sm_cg"),
+            f"ld x{val}, 0(x{ptr})",
+            f"csrc mstatus, x{tmp}",
+            write_sigupd(val, test_data),
+        ]
+
+    lines += gated(
+        [
+            comment_banner(
+                f"cp_checked_mprv_u_page (M, {name})",
+                "In M-mode with mstatus.MPRV = 1 and MPP = U, so with the Sv39 translation, memory tagging\n"
+                "(senvcfg.MT_MODE) and tag table (svittu, the tags page as a user page) of U-mode: a load of the user\n"
+                f"tagged-data page with a mismatching pointer tag: {SW_CHECK_TEXT}, which M-mode\n"
+                "takes; with the matching one: performed; and with a mismatching one, of a user page without\n"
+                "PTE.MTAG: not checked. Record rd",
+            ),
+            f"LI(x{tmp}, {_extended_vitt(_mtag_va('user_tags'), MTAG_PAGE_VA, mt_mode):#x})",
+            f"csrw CSR_SVITTU, x{tmp}",
+            *_set_pmm(tmp, "SSNPM"),
+            f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
+            f"or x{tmp}, x{tmp}, x{addr}",
+            f"csrs senvcfg, x{tmp}",
+            *tag("user", 0x40, good),
+            *tag("user_untagged", 0x40, good),
+            "RVTEST_TSBI_GOTO_MMODE",
+            *mprv_u_load("mprv_u_mismatch", "user", bad),
+            *mprv_u_load("mprv_u_match", "user", good),
+            *mprv_u_load("mprv_u_untagged", "user_untagged", bad),
+            "RVTEST_TSBI_GOTO_SMODE",
+            f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
+            f"csrc senvcfg, x{tmp}",
+            "csrw CSR_SVITTU, x0",
+        ],
+        "defined(U_SUPPORTED) && defined(SSNPM_SUPPORTED) && defined(STANDARD_SM_SUPPORTED)",
+    )
+    test_data.int_regs.return_registers([addr, tmp])
     return lines
 
 
@@ -2707,9 +3257,9 @@ def _check_data_dword(chunk: int, dword: int) -> int:
 
 
 def _h_two_stage_unchecked_tests(test_data: TestData, cg: str, mt_mode: int, regs: tuple[int, int, int]) -> list[str]:
-    """With two-stage translation, whose first-stage paging makes only PTE.MTAG pages tagged-data pages (PTE.MTAG is
-    not allocated yet): in VS-mode, a load and a store of the valid tag page with a mismatching pointer tag, which are
-    not tag checked."""
+    """With two-stage translation, whose first-stage paging makes only PTE.MTAG pages tagged-data pages: in VS-mode, a
+    load and a store of the valid tag page, whose VS-stage leaf PTE has no PTE.MTAG, with a mismatching pointer tag,
+    which are not tag checked."""
     _, addr, tmp = regs
     name = MT_NAMES[mt_mode]
     return [
@@ -2743,6 +3293,487 @@ def _h_two_stage_unchecked_tests(test_data: TestData, cg: str, mt_mode: int, reg
         f"sd x{tmp}, 8(x{addr})",
         f"ld x{tmp}, 8(x{addr})",
         write_sigupd(tmp, test_data),
+        "RVTEST_TSBI_GOTO_SMODE",
+    ]
+
+
+# The VS-stage tagged-data page of the two-stage tests: a guest virtual page after VS_SV39.data_va, which maps a guest
+# physical page that the G stage maps to the check data. vsvitts puts the tags of its chunks in the tag page of the
+# two-stage checktag tests, which VS_SV39.data_va maps. Zimt_coverage.svh identifies it by its address.
+VS_MTAG_VA = int(VS_SV39.data_va, 16) + 0x1000
+# The guest page before it, the tag page, which has no PTE.MTAG
+VS_TAG_PAGE_VA = int(VS_SV39.data_va, 16)
+VS_MTAG_GPA = int(SV39X4.data_va, 16) + 0x2000
+VS_MTAG_CHUNK = 5
+# A guest physical page whose G-stage leaf PTE has PTE.MTAG, which is reserved there. Zimt_coverage.svh identifies it by
+# its address.
+G_MTAG_GPA = int(SV39X4.data_va, 16) + 0x1000
+# The guest pages of the HLV/HSV tests with two-stage translation, of MPRV with MPV = 1 and MPP = U, and of the VS-stage
+# code pages, after VS_MTAG_VA: a page without PTE.MTAG right after it (for an access over both); a user tagged-data
+# page and a user page without PTE.MTAG; a page that the VS stage does not map, and one whose guest physical page
+# G_FAULT_GPA the G stage does not map (the tag pages of tag-load faults); and the VS-stage code pages, tagcheck-exempt
+# and without PTE.MTAG, which map VS_CODE_GPA, the guest physical page that the G stage maps to the code page of
+# _vs_code_page. The data pages map VS_MTAG_GPA. vsvitts and vsvittu put the tags of all their chunks in the tag page
+# that VS_SV39.data_va maps. Zimt_coverage.svh identifies the pages by their addresses.
+VS_PLAIN_VA = VS_MTAG_VA + 0x1000
+VS_USER_MTAG_VA = VS_MTAG_VA + 0x2000
+VS_USER_VA = VS_MTAG_VA + 0x3000
+VS_FAULT_VA = VS_MTAG_VA + 0x4000
+VS_G_FAULT_VA = VS_MTAG_VA + 0x5000
+VS_EXEMPT_CODE_VA = VS_MTAG_VA + 0x6000
+VS_NORMAL_CODE_VA = VS_MTAG_VA + 0x7000
+# The tag page that VS_SV39.data_va maps, again as a user page, for the tag loads of VU-mode
+VS_USER_TAGS_VA = VS_MTAG_VA + 0x8000
+VS_CODE_GPA = int(SV39X4.data_va, 16) + 0x3000
+G_FAULT_GPA = int(SV39X4.data_va, 16) + 0x4000
+# A virtual page whose VS-stage level-1 PTE points to a page table at G_FAULT_GPA: its VS-stage walk takes a guest-page
+# fault in an implicit access, with htval = (G_FAULT_GPA + 8 * its level-0 index) >> 2 and htinst = 0x3000. It is in
+# the 2 MiB after the other guest pages, whose level-1 PTE no other mapping writes.
+VS_IMPLICIT_VA = VS_MTAG_VA + 0x20_0000
+# The data chunk of these tests in each data page
+VS_PAGE_CHUNK = 2
+# The code page that VS_CODE_GPA maps, in the code of each tag width: its instructions at MTAG_CODE_LOAD and
+# MTAG_CODE_STORE are those of MTAG_CODE
+VS_CODE = "zimt_vs_code"
+
+
+def _vs_code_page(label: str, code: tuple[int, int, int]) -> list[str]:
+    """The VS-stage code page label, in the code, which the code before it jumps over. Its instructions use the
+    registers code (pointer, value, return address): a load into the second register and a store of it through the
+    first one, each followed by a return through the third."""
+    ptr, val, ret = code
+    return [
+        "j 1f",
+        ".p2align 12",
+        f"{label}:",
+        ".option push",
+        ".option norvc",
+        f"ld x{val}, 0(x{ptr})",
+        f"jalr x0, 0(x{ret})",
+        f"sd x{val}, 0(x{ptr})",
+        f"jalr x0, 0(x{ret})",
+        ".option pop",
+        ".p2align 12",
+        "1:",
+    ]
+
+
+def _vs_tag_vitt(mt_mode: int, page: int = int(VS_SV39.data_va, 16)) -> int:
+    """The tag table base that puts the tags of the chunks of the guest pages from VS_MTAG_VA in the guest page page."""
+    return page - (_tag_offset(VS_MTAG_VA >> 4, mt_mode) & ~0xFFF)
+
+
+def _vs_tag(va: int, tag: int, mt_mode: int, regs: tuple[int, int]) -> list[str]:
+    """Set the memory tag of the chunk at the guest virtual address va to tag, in the second tag table page, which
+    VS_SV39.data_va maps. With 4-bit tags, the other chunk of its tag byte gets it too."""
+    addr, val = regs
+    byte = _tag_offset(va >> 4, mt_mode) - (_tag_offset(VS_MTAG_VA >> 4, mt_mode) & ~0xFFF)
+    assert 0 <= byte < 0x1000, "the tags of the guest pages must be in one tag page"
+    return [
+        f"LA(x{addr}, {TAG_TABLE} + {0x1000 + byte:#x})",
+        f"LI(x{val}, {tag if mt_mode == MT_TAG7 else tag * 0x11:#x})",
+        f"sb x{val}, 0(x{addr})",
+    ]
+
+
+def _h_two_stage_mtag_tests(test_data: TestData, cg: str, mt_mode: int, regs: tuple[int, int, int]) -> list[str]:
+    """With two-stage translation, a VS-stage leaf PTE with PTE.MTAG maps a tagged-data page, whose loads and stores
+    are tag checked: in VS-mode, a load and a store of its chunk VS_MTAG_CHUNK, whose tag HS-mode sets to GOOD_TAG,
+    with the matching and with a mismatching pointer tag. HS-mode takes the traps, records the doubleword the stores
+    write and restores it. Needs the mapping of VS_SV39.data_va to the second tag table page through both stages."""
+    _, addr, tmp = regs
+    name = MT_NAMES[mt_mode]
+    good = GOOD_TAG[mt_mode]
+    first = _tag_offset(VS_MTAG_VA >> 4, mt_mode) & ~0xFFF
+    byte = _tag_offset((VS_MTAG_VA >> 4) + VS_MTAG_CHUNK, mt_mode) - first
+    lines = [
+        *create_page_mapping(
+            VS_SV39,
+            leaf_level=0,
+            leaf_flags=MTAG_TAGGED_FLAGS,
+            virtual_address=hex(VS_MTAG_VA),
+            physical_address=hex(VS_MTAG_GPA),
+            regs=regs,
+            pa_is_label=False,
+        ),
+        *create_page_mapping(
+            SV39X4,
+            leaf_level=0,
+            leaf_flags=PteFlags(user=True, execute=False),
+            virtual_address=hex(VS_MTAG_GPA),
+            physical_address=CHECK_DATA,
+            regs=regs,
+        ),
+        "hfence.vvma",
+        "hfence.gvma",
+        f"LI(x{tmp}, {int(VS_SV39.data_va, 16) - first:#x})",
+        f"csrw CSR_VSVITTS, x{tmp}",
+        f"LA(x{addr}, {TAG_TABLE} + {0x1000 + byte:#x})",
+        f"LI(x{tmp}, {good if mt_mode == MT_TAG7 else good * 0x11:#x})",
+        f"sb x{tmp}, 0(x{addr})",
+        "RVTEST_TSBI_GOTO_VSMODE",
+    ]
+    for case, tag in (("match", good), ("mismatch", BAD_TAG[mt_mode])):
+        lines += [
+            f"LI(x{addr}, {_tag_field(tag, mt_mode) | (VS_MTAG_VA + 16 * VS_MTAG_CHUNK):#x})",
+            f"LI(x{tmp}, {RD_CANARY:#x})",
+            test_data.add_testcase(f"VS_{name}_mtag_{case}_load", "cp_checked_vs_tagged_page", cg),
+            f"ld x{tmp}, 0(x{addr})",
+            write_sigupd(tmp, test_data),
+            f"LI(x{tmp}, {G_STAGE_STORE_DATA[case]:#x})",
+            test_data.add_testcase(f"VS_{name}_mtag_{case}_store", "cp_checked_vs_tagged_page", cg),
+            f"sd x{tmp}, 8(x{addr})",
+        ]
+    return [
+        *lines,
+        "RVTEST_TSBI_GOTO_SMODE",
+        f"LA(x{addr}, {CHECK_DATA} + {16 * VS_MTAG_CHUNK + 8})",
+        f"ld x{tmp}, 0(x{addr})",
+        write_sigupd(tmp, test_data),
+        f"LI(x{tmp}, {_check_data_dword(VS_MTAG_CHUNK, 1):#x})",
+        f"sd x{tmp}, 0(x{addr})",
+    ]
+
+
+def _h_hlsv_paging_tests(test_data: TestData, cg: str, mt_mode: int, regs: tuple[int, int, int]) -> list[str]:
+    """HLV and HSV in HS-mode with hstatus.SPVP = 1 and two-stage translation, where only VS-stage PTE.MTAG pages are
+    tagged-data pages: of VS_MTAG_VA with the matching pointer tag and with a mismatching one; with a mismatching one, of
+    a page without PTE.MTAG and (vsstatus.SUM = 1) of a user tagged-data page, which a supervisor access does not check;
+    over VS_MTAG_VA and the page after it, checked in both, with the chunk in the second one mismatching, and over the
+    page without PTE.MTAG before it and it, also checked in both, with the chunk in the first one mismatching, then
+    matching (with byte by byte misaligned accesses); and with vsvitts putting the tags in a guest page that the VS stage
+    does not map, then in one whose guest physical page the G stage does not map: a load page fault and a load
+    guest-page fault on the tag, also for HSV. Needs the VS_MTAG_VA mapping and vsvitts of _h_two_stage_mtag_tests."""
+    _, addr, tmp = regs
+    rec = test_data.int_regs.get_register()
+    name = MT_NAMES[mt_mode]
+    good, bad = GOOD_TAG[mt_mode], BAD_TAG[mt_mode]
+    offset = 16 * VS_PAGE_CHUNK
+
+    def access(case: str, va: int, tag: int, restore: bool = True) -> list[str]:
+        """hlv.d and hsv.d of va with the pointer tag tag; record rd, and the doubleword of VS_MTAG_GPA (the check data)
+        that va maps, which the store writes, and restore it."""
+        lines = [
+            f"LI(x{addr}, {_tag_field(tag, mt_mode) | va:#x})",
+            f"LI(x{tmp}, {RD_CANARY:#x})",
+            test_data.add_testcase(f"HS_{name}_paged_{case}_hlv", "cp_hlsv_paged", cg),
+            f"hlv.d x{tmp}, (x{addr})",
+            write_sigupd(tmp, test_data),
+            f"LI(x{tmp}, 0x0123456789abcdef)",
+            test_data.add_testcase(f"HS_{name}_paged_{case}_hsv", "cp_hlsv_paged", cg),
+            f"hsv.d x{tmp}, (x{addr})",
+        ]
+        if not restore:
+            return lines
+        return [
+            *lines,
+            f"LA(x{rec}, {CHECK_DATA} + {va & 0xFFF:#x})",
+            f"ld x{tmp}, 0(x{rec})",
+            write_sigupd(tmp, test_data),
+            f"LI(x{tmp}, {_check_data_dword((va & 0xFFF) >> 4, (va >> 3) & 1):#x})",
+            f"sd x{tmp}, 0(x{rec})",
+        ]
+
+    def vsvitts(page: int) -> list[str]:
+        return [f"LI(x{tmp}, {_vs_tag_vitt(mt_mode, page):#x})", f"csrw CSR_VSVITTS, x{tmp}"]
+
+    def vs_page(va: int, flags: PteFlags, gpa: int) -> list[str]:
+        return create_page_mapping(
+            VS_SV39,
+            leaf_level=0,
+            leaf_flags=flags,
+            virtual_address=hex(va),
+            physical_address=hex(gpa),
+            regs=regs,
+            pa_is_label=False,
+        )
+
+    lines = [
+        comment_banner(
+            f"cp_hlsv_paged (HS, {name})",
+            "In HS-mode with hstatus.SPVP = 1 and two-stage translation: hlv.d and hsv.d of the VS-stage tagged-data\n"
+            "page with the matching pointer tag, and with a mismatching one: a software-check exception (cause 18,\n"
+            "stval 4) with hstatus.GVA = 1; with a mismatching one, of a page without PTE.MTAG and (vsstatus.SUM = 1)\n"
+            "of a user tagged-data page: not checked; (byte by byte misaligned accesses) over the tagged-data page and\n"
+            "the page after it, whose chunk mismatches: checked in both; over the page without PTE.MTAG before it and\n"
+            "it, whose chunk in the first page mismatches, then matches: checked in both; and with vsvitts putting the\n"
+            "tag in a guest page that the VS stage does not map, then in one whose guest physical page the G stage does\n"
+            "not map: a load page fault, then a load guest-page fault, on the tag, also for hsv.d. Record rd and memory",
+        ),
+        *vs_page(VS_PLAIN_VA, PteFlags(execute=False), VS_MTAG_GPA),
+        *vs_page(VS_USER_MTAG_VA, PteFlags(user=True, execute=False, extra=(PTE_MTAG,)), VS_MTAG_GPA),
+        *vs_page(VS_G_FAULT_VA, PteFlags(execute=False), G_FAULT_GPA),
+        "hfence.vvma",
+        *_vs_tag(VS_MTAG_VA + offset, good, mt_mode, (rec, tmp)),
+        *_vs_tag(VS_PLAIN_VA + offset, good, mt_mode, (rec, tmp)),
+        *_vs_tag(VS_USER_MTAG_VA + offset, good, mt_mode, (rec, tmp)),
+        *_vs_tag(VS_MTAG_VA + 0xFF0, good, mt_mode, (rec, tmp)),
+        *_vs_tag(VS_PLAIN_VA, bad, mt_mode, (rec, tmp)),
+        f"LI(x{tmp}, HSTATUS_SPVP)",
+        f"csrs hstatus, x{tmp}",
+        *access("tagged_match", VS_MTAG_VA + offset, good),
+        *access("tagged_mismatch", VS_MTAG_VA + offset, bad),
+        *access("untagged", VS_PLAIN_VA + offset, bad),
+        f"LI(x{tmp}, SSTATUS_SUM)",
+        f"csrs vsstatus, x{tmp}",
+        *access("user_sum", VS_USER_MTAG_VA + offset, bad),
+        f"LI(x{tmp}, SSTATUS_SUM)",
+        f"csrc vsstatus, x{tmp}",
+        *gated(access("straddle", VS_MTAG_VA + 0xFFC, good, restore=False), PAGE_CROSSING_GATE),
+        *gated(
+            [
+                *_vs_tag(VS_TAG_PAGE_VA + 0xFF0, bad, mt_mode, (rec, tmp)),
+                *_vs_tag(VS_MTAG_VA, good, mt_mode, (rec, tmp)),
+                *access("straddle_untagged_mismatch", VS_TAG_PAGE_VA + 0xFFC, good, restore=False),
+                *_vs_tag(VS_TAG_PAGE_VA + 0xFF0, good, mt_mode, (rec, tmp)),
+                *access("straddle_untagged_match", VS_TAG_PAGE_VA + 0xFFC, good, restore=False),
+                f"LA(x{rec}, {CHECK_DATA})",
+                f"ld x{tmp}, 0(x{rec})",
+                write_sigupd(tmp, test_data),
+                f"LI(x{tmp}, {_check_data_dword(0, 0):#x})",
+                f"sd x{tmp}, 0(x{rec})",
+            ],
+            PAGE_CROSSING_GATE,
+        ),
+        *vsvitts(VS_FAULT_VA),
+        *access("tag_page_fault", VS_MTAG_VA + offset, good, restore=False),
+        *vsvitts(VS_G_FAULT_VA),
+        *access("tag_guest_page_fault", VS_MTAG_VA + offset, good, restore=False),
+        *vsvitts(int(VS_SV39.data_va, 16)),
+        f"LI(x{tmp}, HSTATUS_SPVP)",
+        f"csrc hstatus, x{tmp}",
+    ]
+    test_data.int_regs.return_register(rec)
+    return lines
+
+
+def _h_vs_code_tests(test_data: TestData, cg: str, mt_mode: int, regs: tuple[int, int, int]) -> list[str]:
+    """In VS-mode with two-stage translation, code in a VS-stage tagcheck-exempt code page (PTE.MTAG = 1, X = 1) and in
+    one without PTE.MTAG, which map the same code page of _vs_code_page, loads and stores with a mismatching pointer tag
+    in VS_MTAG_VA: not checked from the first one, checked from the second one. HS-mode takes the traps, and records
+    and restores the doubleword. Then a load of VS_IMPLICIT_VA from each code page: a guest-page fault in an implicit
+    access of the VS-stage walk, whose trap to HS-mode writes the pseudoinstruction to htinst and so deposits the MTAG
+    bit of the code page in hstatus.MTAG_I, which HS-mode records. The code page uses regs (pointer, value, return
+    address) after the mappings."""
+    ptr, val, ret = regs
+    name = MT_NAMES[mt_mode]
+    label = f"{VS_CODE}_{name}"
+    offset = 16 * VS_PAGE_CHUNK
+    mtag_i = f"{1 << HSTATUS_MTAG_I_BIT:#x}"
+
+    def call(
+        case: str, va: int, entry: int, value: int = RD_CANARY, coverpoint: str = "cp_vs_mtag_code_access"
+    ) -> list[str]:
+        return [
+            f"LI(x{val}, {value:#x})",
+            f"LI(x{ret}, {va + entry:#x})",
+            test_data.add_testcase(f"VS_{name}_{case}", coverpoint, cg),
+            f"jalr x{ret}, 0(x{ret})",
+        ]
+
+    def record() -> list[str]:
+        return [
+            "RVTEST_TSBI_GOTO_SMODE",
+            f"LA(x{ret}, {CHECK_DATA} + {offset:#x})",
+            f"ld x{val}, 0(x{ret})",
+            write_sigupd(val, test_data),
+            f"LI(x{val}, {_check_data_dword(VS_PAGE_CHUNK, 0):#x})",
+            f"sd x{val}, 0(x{ret})",
+            "RVTEST_TSBI_GOTO_VSMODE",
+        ]
+
+    def deposit(case: str, va: int, before: bool) -> list[str]:
+        """From HS-mode, with hstatus.MTAG_I = before: in VS-mode, the load of VS_IMPLICIT_VA from the code page va;
+        then hstatus.MTAG_I in HS-mode, recorded and cleared."""
+        return [
+            f"LI(x{val}, {mtag_i})",
+            f"csr{'s' if before else 'c'} hstatus, x{val}",
+            "RVTEST_TSBI_GOTO_VSMODE",
+            f"LI(x{ptr}, {VS_IMPLICIT_VA:#x})",
+            *call(case, va, MTAG_CODE_LOAD, coverpoint="cp_mtag_i_deposit"),
+            "RVTEST_TSBI_GOTO_SMODE",
+            f"csrr x{val}, hstatus",
+            f"srli x{val}, x{val}, {HSTATUS_MTAG_I_BIT}",
+            f"andi x{val}, x{val}, 1",
+            write_sigupd(val, test_data),
+            f"LI(x{val}, {mtag_i})",
+            f"csrc hstatus, x{val}",
+        ]
+
+    return [
+        *_vs_code_page(label, regs),
+        comment_banner(
+            f"cp_vs_mtag_code_access (VS, {name})",
+            "In VS-mode with two-stage translation, through a pointer with a mismatching tag to the VS-stage\n"
+            "tagged-data page: a load and a store from a VS-stage tagcheck-exempt code page (PTE.MTAG = 1, X = 1): not\n"
+            f"checked; from a VS-stage code page without PTE.MTAG: a {SW_CHECK_TEXT}, which\n"
+            "HS-mode takes. Record rd and memory",
+        ),
+        *create_page_mapping(
+            VS_SV39,
+            leaf_level=0,
+            leaf_flags=MTAG_EXEMPT_FLAGS,
+            virtual_address=hex(VS_EXEMPT_CODE_VA),
+            physical_address=hex(VS_CODE_GPA),
+            regs=regs,
+            pa_is_label=False,
+        ),
+        *create_page_mapping(
+            VS_SV39,
+            leaf_level=0,
+            leaf_flags=PteFlags(write=False),
+            virtual_address=hex(VS_NORMAL_CODE_VA),
+            physical_address=hex(VS_CODE_GPA),
+            regs=regs,
+            pa_is_label=False,
+        ),
+        *create_page_mapping(
+            SV39X4,
+            leaf_level=0,
+            leaf_flags=PteFlags(user=True, write=False),
+            virtual_address=hex(VS_CODE_GPA),
+            physical_address=label,
+            regs=regs,
+        ),
+        "hfence.vvma",
+        "hfence.gvma",
+        *_vs_tag(VS_MTAG_VA + offset, GOOD_TAG[mt_mode], mt_mode, (val, ret)),
+        "RVTEST_TSBI_GOTO_VSMODE",
+        f"LI(x{ptr}, {_tag_field(BAD_TAG[mt_mode], mt_mode) | (VS_MTAG_VA + offset):#x})",
+        *call("exempt_load", VS_EXEMPT_CODE_VA, MTAG_CODE_LOAD),
+        write_sigupd(val, test_data),
+        *call("exempt_store", VS_EXEMPT_CODE_VA, MTAG_CODE_STORE, 0x1357_9BDF_0246_8ACE),
+        *record(),
+        *call("normal_code_load", VS_NORMAL_CODE_VA, MTAG_CODE_LOAD),
+        write_sigupd(val, test_data),
+        *call("normal_code_store", VS_NORMAL_CODE_VA, MTAG_CODE_STORE, 0x0246_8ACE_1357_9BDF),
+        *record(),
+        "RVTEST_TSBI_GOTO_SMODE",
+        comment_banner(
+            f"cp_mtag_i_deposit (VS, {name})",
+            "In VS-mode with two-stage translation, a load whose VS-stage walk reads a page table at a guest physical\n"
+            "page that the G stage does not map: a load guest-page fault, which HS-mode takes, with htval = the\n"
+            "address of the PTE >> 2 and htinst = 0x3000, a pseudoinstruction, so it deposits the MTAG bit of the code\n"
+            "page in hstatus.MTAG_I: 1 from the tagcheck-exempt code page (0 before), 0 from the other one (1 before).\n"
+            "Record hstatus.MTAG_I",
+        ),
+        *write_pte(
+            VS_SV39,
+            level=1,
+            flags=PteFlags.nonleaf(),
+            virtual_address=hex(VS_IMPLICIT_VA),
+            physical_address=hex(G_FAULT_GPA),
+            regs=regs,
+            pa_is_label=False,
+        ),
+        "hfence.vvma",
+        *deposit("deposit_exempt", VS_EXEMPT_CODE_VA, before=False),
+        *deposit("deposit_normal", VS_NORMAL_CODE_VA, before=True),
+        f"LA(x{ret}, {VS_SV39.pte_address(1, hex(VS_IMPLICIT_VA))})",
+        f"SREG x0, 0(x{ret})",
+        "hfence.vvma",
+    ]
+
+
+def _h_mprv_vu_paging_tests(test_data: TestData, mt_mode: int, regs: tuple[int, int, int]) -> list[str]:
+    """In M-mode with mstatus.MPRV = 1, MPV = 1 and MPP = U, so with the two-stage translation, memory tagging
+    (senvcfg.MT_MODE) and tag table (vsvittu) of VU-mode: a load of a VS-stage user tagged-data page with a mismatching
+    pointer tag (a software-check exception with GVA = 0, which M-mode takes) and with the matching one, and of a
+    VS-stage user page without PTE.MTAG with a mismatching one (not checked). Needs the mappings of
+    _h_hlsv_paging_tests."""
+    pte, addr, tmp = regs
+    name = MT_NAMES[mt_mode]
+    good, bad = GOOD_TAG[mt_mode], BAD_TAG[mt_mode]
+    offset = 16 * VS_PAGE_CHUNK
+    lines = [
+        comment_banner(
+            f"cp_checked_mprv_vu_page (M, {name})",
+            "In M-mode with mstatus.MPRV = 1, MPV = 1 and MPP = U, and two-stage translation, with vsvittu putting the\n"
+            "tags in the tag page as a user page: a load of a VS-stage user tagged-data page with a mismatching\n"
+            f"pointer tag: a {SW_CHECK_TEXT} with GVA = 0, which M-mode takes; with the\n"
+            "matching one: performed; and with a mismatching one, of a VS-stage user page without PTE.MTAG: not\n"
+            "checked. Record rd",
+        ),
+        *create_page_mapping(
+            VS_SV39,
+            leaf_level=0,
+            leaf_flags=PteFlags(user=True, execute=False),
+            virtual_address=hex(VS_USER_VA),
+            physical_address=hex(VS_MTAG_GPA),
+            regs=regs,
+            pa_is_label=False,
+        ),
+        *create_page_mapping(
+            VS_SV39,
+            leaf_level=0,
+            leaf_flags=PteFlags(user=True, execute=False),
+            virtual_address=hex(VS_USER_TAGS_VA),
+            physical_address=SV39X4.data_va,
+            regs=regs,
+            pa_is_label=False,
+        ),
+        "hfence.vvma",
+        *_vs_tag(VS_USER_MTAG_VA + offset, good, mt_mode, (addr, tmp)),
+        *_vs_tag(VS_USER_VA + offset, good, mt_mode, (addr, tmp)),
+        f"LI(x{tmp}, {_vs_tag_vitt(mt_mode, VS_USER_TAGS_VA):#x})",
+        f"csrw CSR_VSVITTU, x{tmp}",
+        *_set_pmm(tmp, "SSNPM"),
+        f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
+        f"or x{tmp}, x{tmp}, x{addr}",
+        f"csrs senvcfg, x{tmp}",
+        "RVTEST_TSBI_GOTO_MMODE",
+    ]
+    for case, va, tag in (
+        ("mismatch", VS_USER_MTAG_VA, bad),
+        ("match", VS_USER_MTAG_VA, good),
+        ("untagged", VS_USER_VA, bad),
+    ):
+        lines += [
+            f"LI(x{addr}, {_tag_field(tag, mt_mode) | (va + offset):#x})",
+            f"LI(x{pte}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, MSTATUS_MPP)",
+            f"csrc mstatus, x{tmp}",
+            f"LI(x{tmp}, MSTATUS_MPRV | MSTATUS_MPV)",
+            f"csrs mstatus, x{tmp}",
+            test_data.add_testcase(f"M_{name}_mprv_vu_{case}", "cp_checked_mprv_vu_page", "Zimt_Sm_cg"),
+            f"ld x{pte}, 0(x{addr})",
+            f"csrc mstatus, x{tmp}",
+            write_sigupd(pte, test_data),
+        ]
+    return [
+        *lines,
+        "RVTEST_TSBI_GOTO_SMODE",
+        f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
+        f"csrc senvcfg, x{tmp}",
+        "csrw CSR_VSVITTU, x0",
+    ]
+
+
+def _h_g_stage_mtag_tests(test_data: TestData, cg: str, regs: tuple[int, int, int]) -> list[str]:
+    """With the G stage only and memory tagging disabled in VS-mode, a G-stage leaf PTE with PTE.MTAG, which is reserved
+    there: in VS-mode, a load and a store of its guest physical page raise a load and a store/AMO guest-page fault,
+    which HS-mode takes."""
+    _, addr, tmp = regs
+    return [
+        *create_page_mapping(
+            SV39X4,
+            leaf_level=0,
+            leaf_flags=PteFlags(user=True, execute=False, extra=(PTE_MTAG,)),
+            virtual_address=hex(G_MTAG_GPA),
+            physical_address=CHECK_DATA,
+            regs=regs,
+        ),
+        "hfence.gvma",
+        f"LI(x{tmp}, {0b11 << MT_MODE_LSB:#x})",
+        f"csrc henvcfg, x{tmp}",
+        "RVTEST_TSBI_GOTO_VSMODE",
+        f"LI(x{addr}, {G_MTAG_GPA + 16 * G_STAGE_CHUNK:#x})",
+        f"LI(x{tmp}, {RD_CANARY:#x})",
+        test_data.add_testcase("VS_g_stage_mtag_load", "cp_mtag_g_stage", cg),
+        f"ld x{tmp}, 0(x{addr})",
+        write_sigupd(tmp, test_data),
+        test_data.add_testcase("VS_g_stage_mtag_store", "cp_mtag_g_stage", cg),
+        f"sd x{tmp}, 8(x{addr})",
         "RVTEST_TSBI_GOTO_SMODE",
     ]
 
@@ -2817,22 +3848,28 @@ def _h_g_stage_checked_tests(test_data: TestData, cg: str, mt_mode: int, regs: t
 
 
 def _h_guest_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
-    """checktag in VS-mode with two-stage translation and with the G stage only, and loads and stores: not tag checked
-    with two-stage translation, tag checked with the G stage only."""
+    """checktag in VS-mode with two-stage translation and with the G stage only, and loads and stores: with two-stage
+    translation tag checked in a VS-stage PTE.MTAG page only, also HLV and HSV, and not from a VS-stage tagcheck-exempt
+    code page; with MPRV, MPV = 1 and MPP = U tag checked in a VS-stage user PTE.MTAG page; tag checked with the G stage
+    only, and with 4-bit tags a G-stage leaf PTE with PTE.MTAG, which is reserved there."""
     name = MT_NAMES[mt_mode]
     pte, addr, tmp = test_data.int_regs.get_registers(3)
     regs = (pte, addr, tmp)
     lines = [
         comment_banner(
-            f"cp_checktag_two_stage, cp_checktag_g_stage, cp_checked_translated, cp_checked_g_stage (VS, {name})",
+            "cp_checktag_two_stage, cp_checktag_g_stage, cp_checked_translated, cp_checked_vs_tagged_page, "
+            f"cp_checked_g_stage, cp_mtag_g_stage (VS, {name})",
             f"In VS-mode with {TAG_BITS[mt_mode]}-bit tags, checktags with two-stage translation whose tag page is\n"
             "valid with matching or mismatching tags, execute-only in the VS stage (load page fault), or\n"
             "execute-only or invalid in the G stage (load guest-page fault), and with the G stage only whose tag\n"
             "page is valid or execute-only, or whose tag table base is above the guest physical addresses of\n"
             "Sv39x4. HS-mode takes the traps. With two-stage translation, a load and a store with a mismatching\n"
-            "pointer tag: not tag checked. With the G stage only, loads and stores with the matching and a\n"
-            "mismatching pointer tag, and with their tags in a page that the G stage maps execute-only (load\n"
-            "guest-page fault, also for the store): tag checked",
+            "pointer tag of a page whose VS-stage leaf PTE has no PTE.MTAG: not tag checked; with the matching and a\n"
+            "mismatching one of a page whose VS-stage leaf PTE has PTE.MTAG: tag checked. With the G stage only,\n"
+            "loads and stores with the matching and a mismatching pointer tag, and with their tags in a page that\n"
+            "the G stage maps execute-only (load guest-page fault, also for the store): tag checked. Then with\n"
+            "4-bit tags, with memory tagging disabled, a load and a store of a page whose G-stage leaf PTE has\n"
+            "PTE.MTAG, which is reserved there: load and store/AMO guest-page faults",
         ),
         *_set_pmm(pte, "SSNPM"),
         f"LI(x{tmp}, {mt_mode << MT_MODE_LSB:#x})",
@@ -2866,6 +3903,10 @@ def _h_guest_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[
             test_data, cg, mt_mode, case, "cp_checktag_two_stage", int(VS_SV39.data_va, 16), setup, matching
         )
     lines += _h_two_stage_unchecked_tests(test_data, cg, mt_mode, regs)
+    lines += _h_two_stage_mtag_tests(test_data, cg, mt_mode, regs)
+    lines += _h_hlsv_paging_tests(test_data, cg, mt_mode, regs)
+    lines += _h_vs_code_tests(test_data, cg, mt_mode, regs)
+    lines += gated(_h_mprv_vu_paging_tests(test_data, mt_mode, regs), STANDARD_SM_GATE)
     lines += [*guest_translation_teardown(test_data), *guest_translation_setup(test_data, SV39X4, None, "VSmode")]
     for case, g_flags in H_CHECKTAG_G_STAGE_CASES:
         setup = [
@@ -2886,6 +3927,8 @@ def _h_guest_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[
         test_data, cg, mt_mode, "g_stage_gpa_too_wide", "cp_checktag_g_stage", H_GPA_TOO_WIDE, []
     )
     lines += _h_g_stage_checked_tests(test_data, cg, mt_mode, regs)
+    if mt_mode == MT_TAG4:
+        lines += _h_g_stage_mtag_tests(test_data, cg, regs)
     lines += [
         *guest_translation_teardown(test_data),
         f"LI(x{pte}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
@@ -2927,6 +3970,7 @@ def make_zimt_sm(test_data: TestData) -> list[TestChunk]:
             *gated(_mtagexclude_warl_tests(test_data, cg, "menv"), MTAGEXCLUDE_GATE["menv"]),
             *gated(_swcheck_deleg_tests(test_data, cg, "medeleg"), "defined(S_SUPPORTED)"),
             *_swcheck_cause_tests(test_data, cg, "mcause"),
+            *_mtag_i_write_tests(test_data, cg, "mstatus", MSTATUS_MTAG_I_BIT, "sstatus"),
         ]
     )
     chunks.append(test_data.end_test_chunk())
@@ -2962,25 +4006,17 @@ def make_zimt_s(test_data: TestData) -> list[TestChunk]:
     )
     chunks.append(test_data.end_test_chunk())
 
-    # S-mode uses menvcfg.MT_MODE and menvmtagexclude, which M-mode sets. The M-mode exclusion mask and the
+    # S-mode uses menvcfg.MT_MODE and menvmtagexclude, which it sets through T-SBI. The M-mode exclusion mask and the
     # U-mode MT_MODE and mask hold other values; mseccfg.MT_MODE stays 00 for the M-mode trap handler.
     tc = test_data.begin_test_chunk("S_mt")
     val, tmp = test_data.int_regs.get_registers(2)
     for mt_mode, other in MT_ITERATIONS:
-        iteration = [
-            "RVTEST_TSBI_GOTO_MMODE",
-            *_configure([("menvcfg", mt_mode), ("senvcfg", other)], ["m", "menv", "senv"], val, tmp),
-            "RVTEST_TSBI_GOTO_SMODE",
-        ]
+        iteration = _via_tsbi(_configure([("menvcfg", mt_mode), ("senvcfg", other)], ["m", "menv", "senv"], val, tmp))
         test_data.int_regs.return_registers([val, tmp])
         iteration += _mt_mode_tests(test_data, cg, "S", mt_mode, ENV_TAG["menv"])
         tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
         val, tmp = test_data.int_regs.get_registers(2)
-    tc.code += [
-        "RVTEST_TSBI_GOTO_MMODE",
-        *_restore(["menvcfg", "senvcfg"], ["m", "menv", "senv"], val, tmp),
-        "RVTEST_TSBI_GOTO_SMODE",
-    ]
+    tc.code += _via_tsbi(_restore(["menvcfg", "senvcfg"], ["m", "menv", "senv"], val, tmp))
     test_data.int_regs.return_registers([val, tmp])
     chunks.append(test_data.end_test_chunk())
     return chunks
@@ -3064,6 +4100,7 @@ def make_zimt_h(test_data: TestData) -> list[TestChunk]:
             *_mtagexclude_warl_tests(test_data, cg, "henv"),
             *_swcheck_deleg_tests(test_data, cg, "hedeleg"),
             *_swcheck_cause_tests(test_data, cg, "vscause"),
+            *_mtag_i_write_tests(test_data, cg, "hstatus", HSTATUS_MTAG_I_BIT),
         ]
     )
     for mode in ("VS", "VU"):
@@ -3367,6 +4404,166 @@ def _vs_swcheck_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
     return lines
 
 
+def _h_mtag_i_access_tests(test_data: TestData, cg: str, mode: str, mt_mode: int) -> list[str]:
+    """In VS-mode or VU-mode with Bare translation and memory tagging enabled, hstatus.MTAG_I = 1, which only makes HLV
+    and HSV unchecked: a load and a store with a mismatching pointer tag raise a software-check exception."""
+    name = MT_NAMES[mt_mode]
+    ptr, val, tmp, save = test_data.int_regs.get_registers(4)
+    mtag_i = f"{1 << HSTATUS_MTAG_I_BIT:#x}"
+    lines = [
+        comment_banner(
+            f"cp_checked_hstatus_mtag_i ({mode}, {name})",
+            f"In {mode}-mode with hstatus.MTAG_I = 1, which only affects HLV and HSV: a load and a store with a\n"
+            f"mismatching pointer tag: {SW_CHECK_TEXT}. Record rd and memory",
+        ),
+        "RVTEST_TSBI_GOTO_SMODE",
+        f"LI(x{tmp}, {mtag_i})",
+        f"csrs hstatus, x{tmp}",
+        f"RVTEST_TSBI_GOTO_{mode}MODE",
+        *_check_pointer(ptr, tmp, mt_mode, 3, BAD_TAG[mt_mode]),
+        f"LI(x{val}, {RD_CANARY:#x})",
+        test_data.add_testcase(f"{mode}_{name}_hstatus_mtag_i_load", "cp_checked_hstatus_mtag_i", cg),
+        f"ld x{val}, 0(x{ptr})",
+        write_sigupd(val, test_data),
+        f"LI(x{val}, 0xfedcba9876543210)",
+        test_data.add_testcase(f"{mode}_{name}_hstatus_mtag_i_store", "cp_checked_hstatus_mtag_i", cg),
+        f"sd x{val}, 0(x{ptr})",
+        *_record_via_sp(test_data, ptr, 0, val, save),
+        "RVTEST_TSBI_GOTO_SMODE",
+        f"LI(x{tmp}, {mtag_i})",
+        f"csrc hstatus, x{tmp}",
+        f"RVTEST_TSBI_GOTO_{mode}MODE",
+    ]
+    test_data.int_regs.return_registers([ptr, val, tmp, save])
+    return lines
+
+
+# The data chunk of the HLV and HSV tests, whose memory tag is GOOD_TAG
+HLSV_CHUNK = 6
+HUPMM_LSB = 48  # hstatus.HUPMM: bits 49:48
+
+
+def _h_hlsv_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
+    """HLV and HSV in HS-mode and HU-mode with Bare vsatp and hgatp, which make all guest pages tagged-data pages: they
+    are checked with the MT_MODE, tag table and pointer masking of their guest mode, VS-mode with hstatus.SPVP = 1
+    (henvcfg, vsvitts) and VU-mode with SPVP = 0 (vsvittu; senvcfg in HS-mode, hstatus.VUMT_MODE and HUPMM in HU-mode),
+    and a mismatch raises a software-check exception with hstatus.GVA = 1, which HS-mode takes. Not with
+    hstatus.MTAG_I = 1, and never HLVX. The tag table of the other guest mode is the second tag table page, where the
+    chunk of the accesses has the mismatching tag, so that with it the outcome of each case differs. Memory tagging
+    stays disabled in HS-mode, and in HU-mode but for the case with senvcfg.MT_MODE set, whose U-mode code accesses
+    memory only through sp and HLV."""
+    name = MT_NAMES[mt_mode]
+    ptr, val, tmp, save = test_data.int_regs.get_registers(4)
+    mt = mt_mode << MT_MODE_LSB
+    data = f"{CHECK_DATA} + {16 * HLSV_CHUNK}"
+    other_table = f"{TAG_TABLE} + 0x1000"
+
+    def access(case: str, coverpoint: str, tag: int, store: bool = True) -> list[str]:
+        """hlv.d and, if store, hsv.d of HLSV_CHUNK through a pointer with tag. Record rd, and the doubleword through
+        sp, and restore it."""
+        lines = [
+            *_check_pointer(ptr, tmp, mt_mode, HLSV_CHUNK, tag),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            test_data.add_testcase(f"{case}_hlv", coverpoint, cg),
+            f"hlv.d x{val}, (x{ptr})",
+            write_sigupd(val, test_data),
+        ]
+        if not store:
+            return lines
+        return [
+            *lines,
+            f"LI(x{val}, 0x0123456789abcdef)",
+            test_data.add_testcase(f"{case}_hsv", coverpoint, cg),
+            f"hsv.d x{val}, (x{ptr})",
+            *_record_via_sp(test_data, ptr, 0, val, save),
+            f"LA(x{tmp}, {data})",
+            f"LI(x{val}, {_check_data_dword(HLSV_CHUNK, 0):#x})",
+            f"sd x{val}, 0(x{tmp})",
+        ]
+
+    def enable(csr: str) -> list[str]:
+        """Set MT_MODE and PMM in csr (henvcfg or senvcfg), or VUMT_MODE and HUPMM in hstatus."""
+        shift = HUPMM_LSB - PMM_LSB if csr == "hstatus" else 0
+        return [
+            *_set_pmm(tmp, "SSNPM"),
+            *([f"slli x{tmp}, x{tmp}, {shift}"] if shift else []),
+            f"LI(x{val}, {mt << shift:#x})",
+            f"or x{tmp}, x{tmp}, x{val}",
+            f"csrs {csr}, x{tmp}",
+        ]
+
+    def write(op: str, csr: str, value: str) -> list[str]:
+        return [f"LI(x{tmp}, {value})", f"{op} {csr}, x{tmp}"]
+
+    lines = [
+        comment_banner(
+            f"cp_hlsv_checked, cp_hlsv_mtag_i, cp_hlvx (HS, {name})",
+            f"In HS-mode with Bare vsatp and hgatp, {TAG_BITS[mt_mode]}-bit tags in VS-mode (henvcfg.MT_MODE, vsvitts)\n"
+            "and hstatus.SPVP = 1: hlv.d and hsv.d with the matching pointer tag, and with a mismatching one: a\n"
+            f"{SW_CHECK_TEXT} with hstatus.GVA = 1; with hstatus.MTAG_I = 1: not\n"
+            "checked. vsvittu points to the second tag table page, where the chunk has the mismatching tag. Through a\n"
+            "pointer without a pointer tag to a chunk whose tag is not 0: hlv.wu, checked, and hlvx.wu, never\n"
+            "checked. Record rd and memory",
+        ),
+        "csrw CSR_VSATP, x0",
+        "csrw CSR_HGATP, x0",
+        *_check_vitt("CSR_VSVITTU", mt_mode, (save, tmp, val), table=other_table),
+        *_check_fill(mt_mode, save, tmp, (HLSV_CHUNK,)),
+        *_check_vitt("CSR_VSVITTS", mt_mode, (save, tmp, val)),
+        *_check_fill(mt_mode, save, tmp, BAD_CHUNKS),
+        *enable("henvcfg"),
+        *write("csrs", "hstatus", "HSTATUS_SPVP"),
+        *access(f"HS_{name}_vs_match", "cp_hlsv_checked", GOOD_TAG[mt_mode]),
+        *access(f"HS_{name}_vs_mismatch", "cp_hlsv_checked", BAD_TAG[mt_mode]),
+        *write("csrs", "hstatus", f"{1 << HSTATUS_MTAG_I_BIT:#x}"),
+        *access(f"HS_{name}_mtag_i", "cp_hlsv_mtag_i", BAD_TAG[mt_mode]),
+        *write("csrc", "hstatus", f"{1 << HSTATUS_MTAG_I_BIT:#x}"),
+        f"LA(x{ptr}, {data})",
+        f"LI(x{val}, {RD_CANARY:#x})",
+        test_data.add_testcase(f"HS_{name}_hlv_wu", "cp_hlvx", cg),
+        f"hlv.wu x{val}, (x{ptr})",
+        write_sigupd(val, test_data),
+        f"LI(x{val}, {RD_CANARY:#x})",
+        test_data.add_testcase(f"HS_{name}_hlvx_wu", "cp_hlvx", cg),
+        f"hlvx.wu x{val}, (x{ptr})",
+        write_sigupd(val, test_data),
+        *write("csrc", "henvcfg", f"{(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x}"),
+        comment_banner(
+            f"cp_hlsv_checked, cp_hlsv_vu_field_hs, cp_hlsv_vu_field_hu (HS, HU, {name})",
+            "With hstatus.SPVP = 0 (VU-mode) and vsvittu, and vsvitts pointing to the second tag table page. In HS-mode,\n"
+            "with senvcfg.MT_MODE set: hlv.d and hsv.d with the matching pointer tag, and with a mismatching one,\n"
+            "checked; with hstatus.VUMT_MODE set instead: hlv.d with a mismatching one, not checked. In HU-mode\n"
+            "(hstatus.HU = 1, hstatus.HUPMM), hlv.d with a mismatching pointer tag: checked with hstatus.VUMT_MODE\n"
+            "set, not with senvcfg.MT_MODE set instead. Record rd and memory",
+        ),
+        *write("csrc", "hstatus", "HSTATUS_SPVP"),
+        *_check_vitt("CSR_VSVITTS", mt_mode, (save, tmp, val), table=other_table),
+        *_check_vitt("CSR_VSVITTU", mt_mode, (save, tmp, val)),
+        *enable("senvcfg"),
+        *access(f"HS_{name}_vu_match", "cp_hlsv_checked", GOOD_TAG[mt_mode]),
+        *access(f"HS_{name}_vu_mismatch", "cp_hlsv_checked", BAD_TAG[mt_mode]),
+        *write("csrc", "senvcfg", f"{0b11 << MT_MODE_LSB:#x}"),
+        *write("csrs", "hstatus", f"{mt_mode << VUMT_MODE_LSB:#x}"),
+        *access(f"HS_{name}_vu_vumt", "cp_hlsv_vu_field_hs", BAD_TAG[mt_mode], store=False),
+        *enable("hstatus"),
+        *write("csrs", "hstatus", "HSTATUS_HU"),
+        "RVTEST_TSBI_GOTO_UMODE",
+        *access(f"HU_{name}_vumt", "cp_hlsv_vu_field_hu", BAD_TAG[mt_mode], store=False),
+        "RVTEST_TSBI_GOTO_SMODE",
+        *write("csrc", "hstatus", f"{0b11 << VUMT_MODE_LSB:#x}"),
+        *write("csrs", "senvcfg", f"{mt:#x}"),
+        "RVTEST_TSBI_GOTO_UMODE",
+        *access(f"HU_{name}_senvcfg", "cp_hlsv_vu_field_hu", BAD_TAG[mt_mode], store=False),
+        "RVTEST_TSBI_GOTO_SMODE",
+        *write("csrc", "hstatus", f"HSTATUS_HU | {0b11 << HUPMM_LSB:#x}"),
+        *write("csrc", "senvcfg", f"{(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x}"),
+        "csrw CSR_VSVITTS, x0",
+        "csrw CSR_VSVITTU, x0",
+    ]
+    test_data.int_regs.return_registers([ptr, val, tmp, save])
+    return lines
+
+
 def _bare_check_setup(csr: str, env: str, ext: str, mt_mode: int, regs: tuple[int, int, int]) -> list[str]:
     """In the supervisor mode of a mode with Bare translation: its tag table base csr for the data chunks, the tags of
     _check_fill with BAD_CHUNKS, and memory tagging (env MT_MODE = mt_mode) with pointer masking (ext's smallest
@@ -3497,7 +4694,7 @@ def make_zimt_sm_checktag(test_data: TestData) -> list[TestChunk]:
     hardware misaligned loads and stores, UDB_MISALIGNED_LDST, as they trap otherwise), ones with sp as the base
     register, and the ordering of tag accesses. Mismatches raise exceptions with mstatus.MPRV = 1 and MPP = S, whose
     loads and stores are checked with the MT_MODE and tag table of S-mode, while M-mode keeps memory tagging disabled;
-    this needs S-mode pointer masking and tag table.
+    this needs S-mode pointer masking and tag table. With mstatus.MTAG_I = 1 too, they are not checked.
     """
     _check_sig_reg(test_data)
     cg = "Zimt_Sm_cg"
@@ -3552,13 +4749,17 @@ def make_zimt_sm_checktag(test_data: TestData) -> list[TestChunk]:
 )
 def make_zimt_s_checktag(test_data: TestData) -> list[TestChunk]:
     """Generate the checktag and implicit tag check tests in S-mode with the tag table svitts: first with Bare
-    translation, then the checktag tests with Sv39 translation, and loads and stores, which address translation keeps
-    from being tag checked.
+    translation, then the checktag tests with Sv39 translation, loads and stores of a page without PTE.MTAG, which are
+    not tag checked, and the PTE.MTAG tests: tagged-data pages, pages with PTE.MTAG that are not (X = 1, or user pages
+    for S-mode), loads and stores over two pages (also into an unmapped page), tagcheck-exempt code pages (also
+    execute-only), PTE.MTAG in a non-leaf PTE and with memory tagging disabled, and U-mode's loads through MPRV in M-mode.
 
     With Bare translation and memory tagging enabled in S-mode (menvcfg), the tests raise no exception, as in M-mode:
     the trap handler of S-mode would be tag checked, and so would the read of the trapping instruction by the trap
     handler of M-mode, which uses mstatus.MPRV = 1 with MPP = S. The mismatches of S-mode's loads and stores are those
-    of Zimt_Sm_checktag with MPRV.
+    of Zimt_Sm_checktag with MPRV, but for those with mstatus.MTAG_I = 1, which makes that read unchecked and not the
+    loads and stores of S-mode, and which M-mode takes. With Sv39, the trap handlers access pages without PTE.MTAG,
+    which are not checked.
     """
     _check_sig_reg(test_data)
     cg = "Zimt_S_cg"
@@ -3589,6 +4790,7 @@ def make_zimt_s_checktag(test_data: TestData) -> list[TestChunk]:
             *_order_tests(test_data, cg, "S", mt_mode, False),
             *_unchecked_access_tests(test_data, cg, "S", mt_mode),
             *_checktag_sp_tests(test_data, cg, "S", mt_mode, False),
+            *gated(_s_mtag_i_tests(test_data, "Zimt_Sm_cg", mt_mode), STANDARD_SM_GATE),
         ]
         val = test_data.int_regs.get_register()
         iteration += [
@@ -3624,13 +4826,20 @@ def make_zimt_s_checktag(test_data: TestData) -> list[TestChunk]:
     test_data.int_regs.return_registers(list(regs))
     tc.code += _s_checktag_tests(test_data, cg, MT_TAG4)
     tc.code += _tag7(_s_checktag_tests(test_data, cg, MT_TAG7))
+    # The registers of the code pages (pointer, value, return address), which both tag widths use
+    p, v, r = test_data.int_regs.get_registers(3)
+    code = (p, v, r)
+    tc.code += _mtag_mapping(test_data)
+    tc.code += _s_mtag_tests(test_data, cg, MT_TAG4, code)
+    tc.code += _tag7(_s_mtag_tests(test_data, cg, MT_TAG7, code))
+    test_data.int_regs.return_registers(list(code))
     tc.code += [
         comment_banner("Restore", "satp = 0 and svitts = 0"),
         "csrw satp, x0",
         "sfence.vma",
         "csrw CSR_SVITTS, x0",
     ]
-    tc.raw_data += [*_tag_table_data(), *_check_data(), *lower_table_data(SV39)]
+    tc.raw_data += [*_tag_table_data(), *_check_data(), *lower_table_data(SV39), *_mtag_data(code)]
     return [test_data.end_test_chunk()]
 
 
@@ -3694,12 +4903,17 @@ def make_zimt_u_checktag(test_data: TestData) -> list[TestChunk]:
 )
 def make_zimt_h_checktag(test_data: TestData) -> list[TestChunk]:
     """Generate the checktag and implicit tag check tests in VS-mode and VU-mode, with the tag tables vsvitts and
-    vsvittu.
+    vsvittu, and of HLV and HSV in HS-mode and HU-mode.
 
     With Bare translation (vsatp and hgatp), VS-mode uses henvcfg.MT_MODE and henvcfg.PMM, VU-mode senvcfg.MT_MODE and
     senvcfg.PMM, which HS-mode sets, as the tags. HS-mode, which takes the exceptions, keeps memory tagging disabled,
-    and so does VS-mode while VU-mode runs. The loads and stores are integer ones. Then, with Sv39, VS-mode checktags
-    with guest translation, whose page faults and guest-page faults HS-mode takes, and a load that is not tag checked.
+    and so does VS-mode while VU-mode runs. The loads and stores are integer ones; hstatus.MTAG_I does not make them
+    unchecked. HLV and HSV are checked with the
+    memory tagging of their guest mode: VS-mode's with hstatus.SPVP = 1; with SPVP = 0 VU-mode's, senvcfg.MT_MODE in
+    HS-mode and hstatus.VUMT_MODE in HU-mode; not with hstatus.MTAG_I = 1, and HLVX never. Then, with Sv39, VS-mode
+    checktags with guest translation, whose page faults and guest-page faults HS-mode takes, loads and stores of a page
+    whose VS-stage leaf PTE has PTE.MTAG or not, also HLV and HSV and from VS-stage code pages with PTE.MTAG or not,
+    VU-mode's through MPRV in M-mode, and of a page whose G-stage leaf PTE has it, which is reserved there.
     """
     _check_sig_reg(test_data)
     cg = "Zimt_H_cg"
@@ -3723,6 +4937,7 @@ def make_zimt_h_checktag(test_data: TestData) -> list[TestChunk]:
             ]
             test_data.int_regs.return_registers(list(regs))
             iteration += _bare_check_tests(test_data, cg, mode, mt_mode, INT_ACCESSES, False)
+            iteration += _h_mtag_i_access_tests(test_data, cg, mode, mt_mode)
             if mode == "VU":
                 iteration += _vs_swcheck_tests(test_data, cg, mt_mode)
             iteration += _fault_tests(
@@ -3736,6 +4951,7 @@ def make_zimt_h_checktag(test_data: TestData) -> list[TestChunk]:
                 f"csrw {csr}, x0",
             ]
             test_data.int_regs.return_register(val)
+        iteration += _h_hlsv_tests(test_data, cg, mt_mode)
         iteration += gated(_h_guest_checktag_tests(test_data, cg, mt_mode), "defined(SV39_SUPPORTED)")
         tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
     tc.raw_data += [*_tag_table_data(), *_check_data(), *guest_table_data()]

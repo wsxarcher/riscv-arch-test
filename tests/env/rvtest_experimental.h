@@ -64,6 +64,12 @@
 #define CSR_VSVITTS          0x6C2
 #define CSR_VSVITTU          0x6C3
 
+// Zimt PTE.MTAG, a bit of first-stage leaf PTEs: with X = 0 the page is a tagged-data
+// page, with X = 1 a tagcheck-exempt code page. The draft specification does not
+// allocate it yet: bit 58 is the placeholder of the Sail reference model (vmem_pte.sail),
+// the highest bit that no ratified extension uses (Svrsw60t59b has bits 60:59).
+#define PTE_MTAG             (1 << 58)
+
 #endif
 
 #endif

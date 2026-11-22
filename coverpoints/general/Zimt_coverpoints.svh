@@ -324,7 +324,8 @@
         bins c_sdsp = {3'd4};
     }
     // The accesses that implicit tag checks do not cover (zimt_unchecked_access), whose pointer tags do not match: no
-    // exception. LR/SC and AMOs, and in M-mode also CMOs, HLV/HSV and vector loads and stores
+    // exception. LR/SC and AMOs, and in M-mode also CMOs, HLV/HSV (whose VU-mode memory tagging, senvcfg.MT_MODE, is
+    // disabled there; M-mode's does not apply to them) and vector loads and stores
     unchecked_access: coverpoint zimt_unchecked_access(ins) iff (zimt_exception(ins) == 8'h00) {
         type_option.weight = 0;
 `ifdef ZALRSC_SUPPORTED
@@ -440,17 +441,20 @@
         bins checktag = {2'b10};
         bins access   = {2'b01};
     }
-    // With address translation, satp (S-mode) or vsatp (VS-mode) not Bare, and a pointer tag: no tag check, no
-    // exception
+    // With first-stage address translation, satp (S-mode) or vsatp (VS-mode) not Bare, of a page without PTE.MTAG
+    // (none of zimt_mtag_page, or its page without PTE.MTAG, and not the VS-stage tagged-data page), not from a code
+    // page of zimt_code_page and without sp as the base register, and a pointer tag: no tag check, no exception
     checked_satp_translated: coverpoint (zimt_atp_mode(ins, CSR_SATP) != 4'd0)
         iff ((zimt_checked_access(ins) != 5'd31) && (ins.current.rs1_val[63:57] != 7'd0) &&
-             (zimt_exception(ins) == 8'h00)) {
+             (zimt_exception(ins) == 8'h00) && (zimt_mtag_page(ins.current.virt_adr_d) inside {3'd0, 3'd2}) &&
+             (zimt_code_page(ins) == 3'd0) && (ins.current.insn[19:15] != 5'd2)) {
         type_option.weight = 0;
         bins translated = {1'b1};
     }
     checked_vsatp_translated: coverpoint (zimt_atp_mode(ins, CSR_VSATP) != 4'd0)
         iff ((zimt_checked_access(ins) != 5'd31) && (ins.current.rs1_val[63:57] != 7'd0) &&
-             (zimt_exception(ins) == 8'h00)) {
+             (zimt_exception(ins) == 8'h00) && (ins.current.virt_adr_d[38:12] != `ZIMT_VS_MTAG_VPN) &&
+             (ins.current.insn[19:15] != 5'd2)) {
         type_option.weight = 0;
         bins translated = {1'b1};
     }
@@ -463,6 +467,301 @@
         bins none                  = {8'h00};
         bins software_check        = {8'h52};
         bins load_guest_page_fault = {8'h55};
+    }
+
+    // With first-stage paging (satp not Bare), a load or store of one page of zimt_mtag_page: of a tagged-data page,
+    // which is checked (the outcome is checked_result)...
+    mtag_tagged_page: coverpoint zimt_mtag_single(ins) {
+        type_option.weight = 0;
+        bins tagged_data = {3'd1};
+    }
+    // ...of a page that a supervisor access does not check, through a pointer with a pointer tag: no exception
+    mtag_unchecked_page: coverpoint zimt_mtag_single(ins)
+        iff ((ins.current.rs1_val[63:57] != 7'd0) && (zimt_exception(ins) == 8'h00)) {
+        type_option.weight = 0;
+        bins user       = {3'd3};
+        bins executable = {3'd4};
+    }
+    // ...of a tagged-data page with memory tagging disabled, which ignores PTE.MTAG: no exception
+    mtag_ignored: coverpoint zimt_mtag_single(ins) iff (zimt_exception(ins) == 8'h00) {
+        type_option.weight = 0;
+        bins tagged_data = {3'd1};
+    }
+    // ...of a data page behind a non-leaf PTE with PTE.MTAG, which is reserved there: a page fault
+    mtag_nonleaf_fault: coverpoint zimt_exception(ins) iff (zimt_mtag_single(ins) == 3'd5) {
+        type_option.weight = 0;
+        bins load_page_fault  = {8'h4D};
+        bins store_page_fault = {8'h4F};
+    }
+    // A load or store over two pages (zimt_mtag_straddle) that the hart checks, in both pages or in the supervisor
+    // one (the outcome is checked_result)...
+    mtag_straddle_checked: coverpoint zimt_mtag_straddle(ins) {
+        type_option.weight = 0;
+        bins tagged_untagged = {3'd1};
+        bins user_tagged     = {3'd2};
+        bins untagged_tagged = {3'd4};
+    }
+    // ...and one that it does not check: no exception
+    mtag_straddle_unchecked: coverpoint zimt_mtag_straddle(ins) iff (zimt_exception(ins) == 8'h00) {
+        type_option.weight = 0;
+        bins untagged_user = {3'd3};
+    }
+    // A load over a tagged-data page, whose chunk mismatches, and an unmapped page (zimt_straddle_unmapped): the load
+    // page fault of the second page, not a software-check exception
+    mtag_straddle_fault: coverpoint zimt_exception(ins) iff (zimt_straddle_unmapped(ins)) {
+        type_option.weight = 0;
+        bins load_page_fault = {8'h4D};
+    }
+    // A load or store through a pointer with a pointer tag, which mismatches in the tests, from a code page
+    // (zimt_code_page): not checked from a tagcheck-exempt code page (no exception), checked from one without PTE.MTAG
+    // (a software-check exception). {code page, software-check exception, no exception}
+    mtag_code_access: coverpoint {zimt_code_page(ins), zimt_exception(ins) == 8'h52, zimt_exception(ins) == 8'h00}
+        iff ((zimt_checked_access(ins) != 5'd31) && (ins.current.rs1_val[63:57] != 7'd0)) {
+        type_option.weight = 0;
+        bins exempt              = {5'b001_01};
+        bins normal              = {5'b010_10};
+        bins exempt_execute_only = {5'b101_01};
+    }
+    // ...and a load of a 32-bit instruction over two code pages: checked unless both are tagcheck-exempt
+    mtag_code_straddle: coverpoint {zimt_code_page(ins), zimt_exception(ins) == 8'h52, zimt_exception(ins) == 8'h00}
+        iff ((zimt_checked_access(ins) != 5'd31) && (ins.current.rs1_val[63:57] != 7'd0)) {
+        type_option.weight = 0;
+        bins exempt_normal = {5'b011_10};
+        bins exempt_exempt = {5'b100_01};
+    }
+    // checktag from a tagcheck-exempt code page, with a mismatching pointer tag: a software-check exception
+    mtag_code_checktag: coverpoint zimt_code_page(ins) iff (zimt_is_checktag(ins) && (zimt_exception(ins) == 8'h52)) {
+        type_option.weight = 0;
+        bins exempt = {3'd1};
+    }
+    // With two-stage translation (vsatp not Bare), a load or store of the page whose VS-stage leaf PTE has PTE.MTAG,
+    // a tagged-data page (the outcome is checked_result), not from a VS-stage code page of zimt_vs_code_page
+    vs_mtag_page: coverpoint (ins.current.virt_adr_d[38:12] == `ZIMT_VS_MTAG_VPN)
+        iff ((zimt_checked_access(ins) != 5'd31) && (zimt_atp_mode(ins, CSR_VSATP) != 4'd0) &&
+             (zimt_vs_code_page(ins) == 2'd0)) {
+        type_option.weight = 0;
+        bins tagged_data = {1'b1};
+    }
+    // A load or store through a pointer with a pointer tag, which mismatches in the tests, from a VS-stage code page
+    // (zimt_vs_code_page): not checked from the tagcheck-exempt one (no exception), checked from the other one (a
+    // software-check exception). {code page, software-check exception, no exception}
+    vs_mtag_code_access: coverpoint {zimt_vs_code_page(ins), zimt_exception(ins) == 8'h52, zimt_exception(ins) == 8'h00}
+        iff ((zimt_checked_access(ins) != 5'd31) && (ins.current.rs1_val[63:57] != 7'd0)) {
+        type_option.weight = 0;
+        bins exempt = {4'b01_01};
+        bins normal = {4'b10_10};
+    }
+    // A load from a VS-stage code page (zimt_vs_code_page) whose VS-stage walk reads a page table that the G stage
+    // does not map: a load guest-page fault that HS-mode takes with the pseudoinstruction 0x3000 in htinst
+    // (zimt_trap_vs_pte_read), depositing the MTAG bit of the code page in hstatus.MTAG_I: 1 from the tagcheck-exempt
+    // code page, 0 from the other one. {code page, hstatus.MTAG_I after the trap}
+    mtag_i_deposit: coverpoint {zimt_vs_code_page(ins), zimt_trap_hstatus_mtag_i(ins)}
+        iff ((zimt_exception(ins) == 8'h55) && zimt_trap_vs_pte_read(ins)) {
+        type_option.weight = 0;
+        bins exempt = {3'b01_1};
+        bins normal = {3'b10_0};
+    }
+    // With the G stage only, a load or store of the guest physical page whose G-stage leaf PTE has PTE.MTAG, which is
+    // reserved there: a guest-page fault
+    mtag_g_stage_fault: coverpoint zimt_exception(ins)
+        iff ((zimt_checked_access(ins) != 5'd31) && (ins.current.virt_adr_d[40:12] == `ZIMT_G_MTAG_GPN) &&
+             (zimt_atp_mode(ins, CSR_VSATP) == 4'd0) && (zimt_atp_mode(ins, CSR_HGATP) != 4'd0)) {
+        type_option.weight = 0;
+        bins load_guest_page_fault  = {8'h55};
+        bins store_guest_page_fault = {8'h57};
+    }
+
+    // mstatus.MTAG_I and hstatus.MTAG_I: set (csrs) or cleared (csrc), mstatus.MTAG_I before a read of sstatus, and
+    // loads and stores with mstatus.MPRV = 1 and MTAG_I = 1 through a pointer with a pointer tag: not checked, no
+    // exception, with MPP = S, or MPV = 1 with MPP = S (VS-mode) or U (VU-mode)
+    mstatus_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins mstatus = {CSR_MSTATUS};
+    }
+    sstatus_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins sstatus = {CSR_SSTATUS};
+    }
+    mtag_i_m_written: coverpoint ins.current.rs1_val[40] {
+        type_option.weight = 0;
+        bins mtag_i = {1'b1};
+    }
+    mtag_i_h_written: coverpoint ins.current.rs1_val[10] {
+        type_option.weight = 0;
+        bins mtag_i = {1'b1};
+    }
+    mtag_i_m_set: coverpoint zimt_mstatus_mtag_i(ins) {
+        type_option.weight = 0;
+        bins set = {1'b1};
+    }
+    mprv_mtag_i_s: coverpoint zimt_mprv_mpp(ins) iff (zimt_mtag_i_unchecked(ins)) {
+        type_option.weight = 0;
+        bins mprv_s = {4'b1001};
+    }
+    mprv_mtag_i_v: coverpoint zimt_mprv_mpp(ins) iff (zimt_mtag_i_unchecked(ins)) {
+        type_option.weight = 0;
+        bins mprv_vs = {4'b1101};
+        bins mprv_vu = {4'b1100};
+    }
+    // The MT_MODE of VS-mode (MPP = S) or VU-mode (MPP = U) for MPRV with MPV = 1, enabled
+    mprv_v_mt: coverpoint zimt_mprv_v_mt(ins) {
+        type_option.weight = 0;
+        bins tag4 = {2'b10};
+`ifdef UDB_ZIMT_POINTER_TAG_WIDTH_7
+        bins tag7 = {2'b11};
+`endif
+    }
+    // A load with MPRV = 1, MPV = 0 and MPP = U (U-mode's translation and memory tagging) and first-stage paging,
+    // through a pointer with a pointer tag (zimt_mtag_single): of the user tagged-data page, with a mismatching tag (a
+    // software-check exception) or the matching one (none); of the user page without PTE.MTAG (not checked: none).
+    // {page, software-check exception, no exception}
+    mprv_u_page: coverpoint {zimt_mtag_single(ins), zimt_exception(ins) == 8'h52, zimt_exception(ins) == 8'h00}
+        iff ((zimt_mprv_mpp(ins) == 4'b1000) && (ins.current.insn[19:15] != 5'd2) &&
+             (ins.current.rs1_val[63:57] != 7'd0)) {
+        type_option.weight = 0;
+        bins user_mismatch = {5'b011_10};
+        bins user_match    = {5'b011_01};
+        bins user_untagged = {5'b111_01};
+    }
+    // ...and with MPV = 1 (VU-mode's) and first-stage paging (zimt_vs_user_page)
+    mprv_vu_page: coverpoint {zimt_vs_user_page(ins), zimt_exception(ins) == 8'h52, zimt_exception(ins) == 8'h00}
+        iff ((zimt_mprv_mpp(ins) == 4'b1100) && (ins.current.insn[19:15] != 5'd2) &&
+             (ins.current.rs1_val[63:57] != 7'd0)) {
+        type_option.weight = 0;
+        bins user_mismatch = {4'b01_10};
+        bins user_match    = {4'b01_01};
+        bins user_untagged = {4'b10_01};
+    }
+    // senvcfg.MT_MODE (U-mode's and VU-mode's), enabled
+    senvcfg_mt: coverpoint zimt_senvcfg_mt(ins) {
+        type_option.weight = 0;
+        bins tag4 = {2'b10};
+`ifdef UDB_ZIMT_POINTER_TAG_WIDTH_7
+        bins tag7 = {2'b11};
+`endif
+    }
+    // The GVA bit of the software-check exception of a mismatch that HS-mode or M-mode takes (zimt_trap_gva): set for
+    // HLV and HSV...
+    hlsv_swcheck_gva: coverpoint zimt_trap_gva(ins)
+        iff ((zimt_hlsv(ins) inside {3'd1, 3'd2}) && (zimt_exception(ins) == 8'h52) &&
+             !ins.current.csr_wb[CSR_VSCAUSE]) {
+        type_option.weight = 0;
+        bins gva = {1'b1};
+    }
+    // ...and clear for the loads and stores of a guest mode, also through MPRV with MPV = 1
+    swcheck_gva_clear: coverpoint zimt_trap_gva(ins)
+        iff ((zimt_checked_access(ins) != 5'd31) && (zimt_exception(ins) == 8'h52) &&
+             !ins.current.csr_wb[CSR_VSCAUSE]) {
+        type_option.weight = 0;
+        bins no_gva = {1'b0};
+    }
+    // A load or store that does not use sp as the base register with mstatus.MTAG_I = 1 and no MPRV (S-mode), or with
+    // hstatus.MTAG_I = 1 (VS-mode and VU-mode), which only affect loads and stores with MPRV and HLV and HSV: still
+    // checked, a software-check exception with a mismatching pointer tag
+    mtag_i_checked: coverpoint zimt_exception(ins)
+        iff ((zimt_checked_access(ins) != 5'd31) && zimt_mstatus_mtag_i(ins) && (ins.current.insn[19:15] != 5'd2)) {
+        type_option.weight = 0;
+        bins software_check = {8'h52};
+    }
+    hstatus_mtag_i_checked: coverpoint zimt_exception(ins)
+        iff ((zimt_checked_access(ins) != 5'd31) && zimt_hstatus_mtag_i(ins) && (ins.current.insn[19:15] != 5'd2)) {
+        type_option.weight = 0;
+        bins software_check = {8'h52};
+    }
+
+    // HLV and HSV (zimt_hlsv) with the MT_MODE of their guest mode enabled (zimt_hlsv_mt_mode) and hstatus.MTAG_I = 0:
+    // by tag width, guest mode (hstatus.SPVP) and kind, and their outcome (none, or a software-check exception)
+    hlsv_access: coverpoint zimt_hlsv(ins)
+        iff ((zimt_hlsv_mt_mode(ins) != 2'b00) && !zimt_hstatus_mtag_i(ins)) {
+        type_option.weight = 0;
+        bins hlv = {3'd1};
+        bins hsv = {3'd2};
+    }
+    // The same with vsatp = Bare, where every guest page is a tagged-data page: the outcomes of cp_hlsv_checked come
+    // from the tag check alone, not from a page without PTE.MTAG (cp_hlsv_paged)
+    hlsv_access_bare: coverpoint zimt_hlsv(ins)
+        iff ((zimt_hlsv_mt_mode(ins) != 2'b00) && !zimt_hstatus_mtag_i(ins) &&
+             (zimt_atp_mode(ins, CSR_VSATP) == 4'd0)) {
+        type_option.weight = 0;
+        bins hlv = {3'd1};
+        bins hsv = {3'd2};
+    }
+    hlsv_mt: coverpoint zimt_hlsv_mt_mode(ins) {
+        type_option.weight = 0;
+        bins tag4 = {2'b10};
+`ifdef UDB_ZIMT_POINTER_TAG_WIDTH_7
+        bins tag7 = {2'b11};
+`endif
+    }
+    hlsv_spvp: coverpoint zimt_spvp(ins) {
+        type_option.weight = 0;
+        bins vu = {1'b0};
+        bins vs = {1'b1};
+    }
+    hlsv_result: coverpoint zimt_exception(ins) iff (zimt_hlsv(ins) != 3'd0) {
+        type_option.weight = 0;
+        bins none           = {8'h00};
+        bins software_check = {8'h52};
+    }
+    // hlv.d with hstatus.SPVP = 0 (VU-mode) and MTAG_I = 0, through a pointer with a mismatching tag, with one of the
+    // fields that hold the MT_MODE of VU-mode enabled (zimt_hlsv_vu_fields): in HS-mode senvcfg.MT_MODE, which it
+    // uses (checked: a software-check exception), or hstatus.VUMT_MODE (not checked: no exception)...
+    hlsv_vu_hs: coverpoint zimt_hlsv_vu_fields(ins)
+        iff ((zimt_hlsv(ins) == 3'd1) && !zimt_spvp(ins) && !zimt_hstatus_mtag_i(ins) &&
+             (ins.current.rs1_val[63:57] != 7'd0)) {
+        type_option.weight = 0;
+        bins senvcfg = {4'b10_10};
+        bins vumt    = {4'b01_01};
+    }
+    // ...in HU-mode hstatus.VUMT_MODE, which it uses (checked), or senvcfg.MT_MODE (not checked)
+    hlsv_vu_hu: coverpoint zimt_hlsv_vu_fields(ins)
+        iff ((zimt_hlsv(ins) == 3'd1) && !zimt_spvp(ins) && !zimt_hstatus_mtag_i(ins) &&
+             (ins.current.rs1_val[63:57] != 7'd0)) {
+        type_option.weight = 0;
+        bins vumt    = {4'b01_10};
+        bins senvcfg = {4'b10_01};
+    }
+    // HLV and HSV with hstatus.MTAG_I = 1 and the MT_MODE of their guest mode enabled, through a pointer with a pointer
+    // tag: not checked, no exception
+    hlsv_mtag_i: coverpoint zimt_hlsv(ins)
+        iff (zimt_hstatus_mtag_i(ins) && (zimt_hlsv_mt_mode(ins) != 2'b00) &&
+             (ins.current.rs1_val[63:57] != 7'd0) && (zimt_exception(ins) == 8'h00)) {
+        type_option.weight = 0;
+        bins hlv = {3'd1};
+        bins hsv = {3'd2};
+    }
+    // hlv.d and hsv.d with hstatus.SPVP = 1 and first-stage paging (zimt_hlsv_page), through a pointer with a pointer
+    // tag: of the VS-stage tagged-data page, with the matching tag (none), a mismatching one (a software-check
+    // exception), and with the tags in a guest page that the VS stage does not map (a load page fault) or whose guest
+    // physical page the G stage does not map (a load guest-page fault); of a page without PTE.MTAG and (vsstatus.SUM =
+    // 1) of a user tagged-data page (not checked: none); and over the tagged-data page and the page after it, checked
+    // in both (a software-check exception), and over the page without PTE.MTAG before it and it, also checked in both
+    // (a software-check exception, then none). {page, exception}
+    hlsv_paged: coverpoint {zimt_hlsv_page(ins), zimt_exception(ins)}
+        iff (zimt_spvp(ins) && (ins.current.rs1_val[63:57] != 7'd0)) {
+        type_option.weight = 0;
+        bins tagged_match         = {11'h1_00};
+        bins tagged_mismatch      = {11'h1_52};
+        bins tag_page_fault       = {11'h1_4D};
+        bins tag_guest_page_fault = {11'h1_55};
+        bins untagged             = {11'h2_00};
+        bins user_sum             = {11'h3_00};
+`ifdef UDB_MISALIGNED_LDST
+`ifdef UDB_MISALIGNED_SPLIT_STRATEGY_SEQUENTIAL_BYTES
+        bins straddle             = {11'h4_52};
+        bins straddle_untagged_mismatch = {11'h5_52};
+        bins straddle_untagged_match    = {11'h5_00};
+`endif
+`endif
+    }
+    // hlv.wu and hlvx.wu with the MT_MODE of their guest mode enabled and hstatus.MTAG_I = 0, of a chunk whose tag
+    // mismatches: HLV is checked (a software-check exception), HLVX never (no exception). {kind, software-check
+    // exception, no exception}
+    hlvx_checked: coverpoint {zimt_hlsv(ins), zimt_exception(ins) == 8'h52, zimt_exception(ins) == 8'h00}
+        iff ((zimt_hlsv_mt_mode(ins) != 2'b00) && !zimt_hstatus_mtag_i(ins)) {
+        type_option.weight = 0;
+        bins hlv_wu  = {5'b011_10};
+        bins hlvx_wu = {5'b100_01};
     }
 
     // MOP.RR.1 and MOP.RR.0 encodings that miss one condition of a Zimt instruction

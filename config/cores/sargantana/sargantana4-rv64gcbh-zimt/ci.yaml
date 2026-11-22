@@ -2,9 +2,9 @@
 # ../run-riscv-arch-test.sh reads exclude_extensions from here instead of config/cores/sargantana/ci.yaml.
 #
 # Based on the config/cores/sargantana/ci.yaml of riscv/riscv-arch-test#3248, which lists the
-# failures of core_tile 1b9529b5 (v4.0.0). This core_tile (6e9aeda with core 46e231ab, csr b7af158,
-# mmu 707a05c) fixes some of them, so the groups that pass on it are dropped; they are listed
-# at the end of this file. Paths are under
+# failures of core_tile 1b9529b5 (v4.0.0). This core_tile (5139d8f with core 2d196fec, csr 9841e0d,
+# mmu c09aa2d and the two-stage translation fixes after it) fixes some of them, so the groups that pass
+# on it are dropped; they are listed at the end of this file. Paths are under
 #   tile:  https://github.com/bsc-loca/core_tile/blob/1b9529b5/
 #   core:  https://github.com/bsc-loca/sargantana/blob/8db4398b/rtl/
 #   csr:   https://github.com/bsc-loca/csr/blob/40a00a0e/rtl/
@@ -82,48 +82,33 @@ exclude_extensions:
   # The same virtual-instruction bug on csrrsi to CSR 0xE00 from VS-mode (https://github.com/bsc-loca/csr/issues/15).
   # Only H_vscsr_ro-01 fails, but a numbered part cannot be excluded alone.
   - H_vscsr_ro-
-  # htval on a guest-page fault in the VS-stage walk (https://github.com/bsc-loca/sargantana/issues/123)
-  - H_trap
-  # The H CSR bugs above (NEW-7, #146, #123, https://github.com/bsc-loca/sargantana/issues/113 item 8), and
+  # The H CSR bugs above (NEW-7, #146, https://github.com/bsc-loca/sargantana/issues/113 item 8), and
   # mstatus.TVM traps SFENCE.VMA in VS-mode: csr:csr_bsc.sv#L2707 (https://github.com/bsc-loca/csr/issues/16)
   - Sm_H_hcsr_access-
   - Sm_H_hcsr_addr-
   - Sm_H_hcsr_walk-
-  - Sm_H_trap-
   - Sm_H_tvm-
-  # A VS-stage superpage over a smaller G-stage page is translated through the superpage's base guest physical address:
-  # mmu:ptw/ptw.sv#L594 (https://github.com/bsc-loca/sargantana/issues/138)
-  - Sv_H_sv39x4_page_sizes
   # A translated fetch, and a PTE read, are not PMA-checked (https://github.com/bsc-loca/sargantana/issues/113 items 16
   # and 3)
   - Sv_H_sv39x4_access_fault
-  # htval of a fault on a VS-stage page-table read (https://github.com/bsc-loca/sargantana/issues/123), and htval drops
-  # guest-physical-address bits above bit 41: mmu:ptw/ptw.sv#L421, #L597 (https://github.com/bsc-loca/sargantana/issues/142)
+  # htval drops guest-physical-address bits above bit 41 (first on a fetch guest-page fault): mmu:ptw/ptw.sv#L421, #L597
+  # (https://github.com/bsc-loca/sargantana/issues/142)
   - Sv_H_sv39x4_gpa_wide
-  # #123, and the G-stage leaf of a VS-level page table is not checked for R and A:
+  # The G-stage leaf of a VS-level page table is not checked for R and A:
   # mmu:ptw/ptw.sv#L576 (https://github.com/bsc-loca/sargantana/issues/141). Sv_H_sv39x4_hlv also hits HLVX ignoring
   # vsstatus.SUM: mmu:tlb/tlb.sv#L478 (https://github.com/bsc-loca/sargantana/issues/139)
   - Sv_H_sv39x4_hlv
   - Sv_H_sv39x4_implicit
-  # mtval2 of a fault in the VS-stage walk (#123)
-  - Sv_HSm_sv39x4_guest_faults
   # Zicbo under two-stage translation: VS-stage and G-stage PTE reads are not PMA-checked
-  # (https://github.com/bsc-loca/sargantana/issues/113 item 3), and the superpage bug of #138 (_g). _zicbom_g also needs
-  # G-stage write permission for cbo.clean/flush/inval: core:datapath/rtl/exe_stage/rtl/load_store_queue.sv#L236-L237
-  # (https://github.com/bsc-loca/sargantana/issues/140). _zicbom_g and _zicbom_vs also hit the PTE cache keeping a
-  # non-leaf PTE that failed its checks (https://github.com/bsc-loca/sargantana/issues/113 item 7).
-  # The _vs tests also hit #123.
+  # (https://github.com/bsc-loca/sargantana/issues/113 item 3). _zicbom_g also needs G-stage write permission for
+  # cbo.clean/flush/inval: core:datapath/rtl/exe_stage/rtl/load_store_queue.sv#L236-L237
+  # (https://github.com/bsc-loca/sargantana/issues/140). _zicbom_g also hits the PTE cache keeping a non-leaf PTE
+  # that failed its checks (https://github.com/bsc-loca/sargantana/issues/113 item 7).
   - Sv_HZicbo_sv39x4_zicbom_g
-  - Sv_HZicbo_sv39x4_zicbom_vs
   - Sv_HZicbo_sv39x4_zicboz_g
-  - Sv_HZicbo_sv39x4_zicboz_vs
   # Virtual-instruction exceptions set GVA = 1 (https://github.com/bsc-loca/sargantana/issues/128)
   - Sv_HZicbo_zicbom_henvcfg
   - Sv_HZicbo_zicboz_henvcfg
-  # Wrong htval on a VS-stage PTE fault (https://github.com/bsc-loca/sargantana/issues/123)
-  - Shtvala-
-  - Shtvala_amo
-  - Shtvala_hlsv
   # VS-stage permission fault reported as a guest-page fault (https://github.com/bsc-loca/sargantana/issues/124)
   - Shvstvala_page_fault
   # An interrupt taken from VS or VU into HS sets hstatus.GVA = 1:
@@ -167,11 +152,6 @@ exclude_extensions:
   - Sstc_H_hs
   - Sstc_H_vs-
   - Sstc_H_vu
-  # xtval on an access that crosses into a faulting page is the start address, not the address of the faulting
-  # page: fetch, core:datapath/rtl/if_stage_1/rtl/if_stage_1.sv#L270; load/store,
-  # core:datapath/rtl/exe_stage/rtl/load_store_queue.sv#L212-L280 (NEW-2)
-  - Shtvala_fetch_straddle
-  - Shtvala_straddle
   # The Svinval fences are not serialized (core:datapath/rtl/id_stage/rtl/decoder.sv#L3309-L3332), and reach the CSR
   # unit with a neighbouring instruction's system-instruction field: a trap reports xtval of the next instruction, and
   # hinval.gvma in HS-mode raises an environment call from S-mode (NEW-3)
@@ -206,3 +186,11 @@ exclude_extensions:
 #   Pointer masking off under MXR (NEW-5, csr b7af158): Ssnpm_bare_pmm10_edgecases, Ssnpm_bare_pmm11_edgecases, Ssnpm_Sm
 #   Sign-extended masked address under satp = Sv39 (NEW-6, core 798f789d): Ssnpm_sv39_pmm10_edgecases,
 #     Ssnpm_sv39_pmm11_edgecases
+#   htval/mtval2 and the pseudoinstruction in htinst/mtinst of a guest-page fault in an implicit access of the VS-stage
+#     walk (#123, core 2d196fec, csr 9841e0d, mmu c09aa2d): H_trap, Sm_H_trap,
+#     Sv_HSm_sv39x4_guest_faults, Sv_HZicbo_sv39x4_zicbom_vs, Sv_HZicbo_sv39x4_zicboz_vs, Shtvala, Shtvala_amo,
+#     Shtvala_hlsv
+#   A VS-stage superpage over smaller G-stage pages translated through its base guest physical address (#138,
+#     mmu after c09aa2d): Sv_H_sv39x4_page_sizes, and Shtvala_fetch_straddle and Shtvala_straddle, whose
+#     wrong xtval #3248 attributes to NEW-2 (the start address of an access that crosses into a faulting page):
+#     they map a VS-stage superpage over G-stage kilopages, and the walk of its base address faulted first

@@ -138,15 +138,88 @@ normative_rule_definitions:
         "{Zimt_Sm_cg, Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/{cp_checked_sp, cp_checked_sp_compressed}",
       ]
 
-  # With paging enabled, only pages with PTE.MTAG = 1 are tagged-data pages. The PTE.MTAG bit is not allocated yet,
-  # so the loads and stores of the tests with first-stage address translation (satp, vsatp) are not checked accesses.
+  # With paging enabled, only the pages whose first-stage leaf PTE has PTE.MTAG = 1 and X = 0 are tagged-data pages,
+  # whose loads and stores are checked accesses. PTE.MTAG is not allocated yet: the tests use bit 58, the placeholder
+  # of the Sail model.
   - name: zimt_checked_access_paging
-    coverpoint: ["{Zimt_S_cg, Zimt_H_cg}/cp_checked_translated"]
+    coverpoint:
+      [
+        "{Zimt_S_cg, Zimt_H_cg}/cp_checked_translated",
+        "Zimt_S_cg/cp_checked_tagged_page",
+        "Zimt_H_cg/{cp_checked_vs_tagged_page, cp_hlsv_paged}",
+        "Zimt_Sm_cg/{cp_checked_mprv_u_page, cp_checked_mprv_vu_page}",
+      ]
 
   # PTE.MTAG is a bit of first-stage page tables: with vsatp = Bare all data pages of VS-mode are tagged-data pages,
   # also with G-stage translation, which translates the tag loads (load guest-page faults).
   - name: zimt_checked_access_g_stage
     coverpoint: ["Zimt_H_cg/cp_checked_g_stage"]
+
+  # A page whose first-stage leaf PTE has PTE.MTAG = 1 and X = 1 is a tagcheck-exempt code page: the loads and stores
+  # of the instructions fetched from it are not checked accesses. An instruction fetched also from another code page
+  # is not exempt. checktag is not affected.
+  - name: zimt_tagcheck_exempt_code
+    coverpoint:
+      [
+        "Zimt_S_cg/{cp_mtag_code_access, cp_mtag_code_checktag, cp_mtag_code_straddle, cp_unchecked_page}",
+        "Zimt_H_cg/cp_vs_mtag_code_access",
+      ]
+
+  # A load or store over a tagged-data page and another page is checked in both pages; with a fault on the second
+  # page, which comes first, it is not checked.
+  - name: zimt_checked_access_straddle
+    coverpoint:
+      [
+        "Zimt_S_cg/{cp_checked_straddle, cp_unchecked_straddle, cp_checked_straddle_fault}",
+        "Zimt_H_cg/cp_hlsv_paged",
+      ]
+
+  # Supervisor accesses to user pages are not checked accesses: the PTE.MTAG of user pages is ignored for them.
+  - name: zimt_supervisor_user_access
+    coverpoint:
+      [
+        "Zimt_S_cg/{cp_unchecked_page, cp_checked_straddle, cp_unchecked_straddle}",
+        "Zimt_H_cg/cp_hlsv_paged",
+        "Zimt_Sm_cg/{cp_checked_mprv_u_page, cp_checked_mprv_vu_page}",
+      ]
+
+  # PTE.MTAG is reserved in non-leaf PTEs and in G-stage PTEs (page faults and guest-page faults), and ignored with
+  # memory tagging disabled.
+  - name: zimt_pte_mtag_reserved
+    coverpoint:
+      [
+        "Zimt_S_cg/{cp_mtag_nonleaf, cp_mtag_mt_disabled}",
+        "Zimt_H_cg/cp_mtag_g_stage",
+      ]
+
+  # HLV and HSV are checked with the xMT_MODE of their effective privilege (henvcfg for VS-mode; for VU-mode senvcfg
+  # in HS-mode and hstatus.VUMT_MODE in HU-mode) and its tag table; a mismatch raises a software-check exception with
+  # hstatus.GVA = 1. HLVX always generates unchecked loads.
+  - name: zimt_hlsv
+    coverpoint:
+      [
+        "Zimt_H_cg/{cp_hlsv_checked, cp_hlsv_vu_field_hs, cp_hlsv_vu_field_hu, cp_hlvx, cp_hlsv_paged, cp_hlsv_gva}",
+        "Zimt_Sm_cg/cp_unchecked_access",
+      ]
+
+  # hstatus.MTAG_I = 1 makes HLV and HSV unchecked, and not the loads and stores of VS-mode and VU-mode.
+  - name: zimt_hstatus_mtag_i
+    coverpoint:
+      ["Zimt_H_cg/{cp_hlsv_mtag_i, cp_mtag_i_write, cp_checked_hstatus_mtag_i}"]
+
+  # With MPRV = 1, mstatus.MTAG_I = 1 makes loads and stores unchecked, and only then. mstatus.MTAG_I is not part of
+  # sstatus.
+  - name: zimt_mstatus_mtag_i
+    coverpoint:
+      [
+        "Zimt_Sm_cg/{cp_checked_mprv_mtag_i, cp_checked_mprv_v_mtag_i, cp_mtag_i_write, cp_mtag_i_view, cp_checked_mtag_i}",
+      ]
+
+  # A trap that writes a nonzero mtinst or htinst deposits the MTAG bit of the trapping instruction's code page in
+  # mstatus.MTAG_I or hstatus.MTAG_I (the VS-stage one). The tests take the guest-page fault of an implicit access of a
+  # VS-stage walk, whose htinst must hold a pseudoinstruction.
+  - name: zimt_mtag_i_deposit
+    coverpoint: ["Zimt_H_cg/cp_mtag_i_deposit"]
 
   # The tag accesses of a hart are ordered with its own stores to the tag table and its settags.
   - name: zimt_tag_ordering
@@ -170,7 +243,7 @@ normative_rule_definitions:
 
   # hstatus.VUMT_MODE (bits 51:50) is the xMT_MODE of HLV and HSV from HU-mode with effective privilege VU.
   - name: zimt_vumt_mode
-    coverpoint: ["Zimt_H_cg/cp_vumt_mode_warl"]
+    coverpoint: ["Zimt_H_cg/{cp_vumt_mode_warl, cp_hlsv_vu_field_hu}"]
 
   # xMT_MODE comes from mseccfg (M), menvcfg (S/HS), senvcfg (U and VU) or henvcfg (VS).
   - name: zimt_mt_mode_source
@@ -232,5 +305,6 @@ normative_rule_definitions:
         "{Zimt_Sm_cg, Zimt_H_cg}/cp_swcheck_deleg",
         "{Zimt_S_cg, Zimt_U_cg, Zimt_H_cg}/cp_checktag_mt_enabled",
         "{Zimt_U_cg, Zimt_H_cg}/cp_checked_access",
-        "Zimt_H_cg/cp_swcheck_to_vs",
+        "Zimt_H_cg/{cp_swcheck_to_vs, cp_swcheck_gva}",
+        "Zimt_Sm_cg/cp_checked_mprv_v_gva",
       ]

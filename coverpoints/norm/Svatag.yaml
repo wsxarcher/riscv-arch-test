@@ -23,3 +23,9 @@ normative_rule_definitions:
   # svitts and svittu are S-mode CSRs, vsvitts and vsvittu are hypervisor CSRs.
   - name: svatag_vitt_acc
     coverpoint: ["{Svatag_S_cg, Svatag_H_cg}/cp_vitt_access"]
+
+  # HLV and HSV use vsvittu or vsvitts as the base of the tag table, as hstatus.SPVP = 0 or 1 selects. The Zimt HLV and
+  # HSV tests use the table of the selected guest mode, and in cp_hlsv_checked that of the other one holds the opposite
+  # tag.
+  - name: svatag_vitt_hlsv
+    coverpoint: ["Zimt_H_cg/{cp_hlsv_checked, cp_hlsv_paged}"]
