@@ -246,6 +246,7 @@ function `XLEN_BITS get_csr_field(int hart, int issue, int prev, bit [11:0] addr
       case(field)
         "gva" : val = (val >> 6) & 'h1;
         "hu" : val = (val >> 9) & 'h1;
+        "hukte" : val = (val >> 24) & 'h1;
 `ifdef UDB_MXLEN_64
         "hupmm" : val = (val >> 48) & 64'h3;
 `endif
@@ -802,6 +803,7 @@ function `XLEN_BITS get_csr_field(int hart, int issue, int prev, bit [11:0] addr
         "cbie" : val = (val >> 4) & 'h3;
         "cbcfe" : val = (val >> 6) & 'h1;
         "cbze" : val = (val >> 7) & 'h1;
+        "ukte" : val = (val >> 8) & 'h1;
 `ifdef UDB_MXLEN_64
         "pmm" : val = (val >> 32) & 64'h3;
 `endif

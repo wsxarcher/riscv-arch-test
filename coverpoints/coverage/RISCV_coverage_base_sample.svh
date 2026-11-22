@@ -184,6 +184,15 @@
     `ifdef COVER_SVVPTC
         svvptc_sample(hart, issue, ins);
     `endif
+    `ifdef COVER_SVUKTEH
+        svukteh_sample(hart, issue, ins);
+    `endif
+    `ifdef COVER_SVUKTES
+        svuktes_sample(hart, issue, ins);
+    `endif
+    `ifdef COVER_SVUKTESM
+        svuktesm_sample(hart, issue, ins);
+    `endif
     `ifdef COVER_U
         u_sample(hart, issue, ins);
     `endif
