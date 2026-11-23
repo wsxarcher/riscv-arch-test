@@ -38,13 +38,16 @@ Each group (Sm: M-mode, S: S-mode, U: U-mode, H: VS-mode and VU-mode, entered fr
   specification says both that tag accesses must not raise one and that settag may without misaligned support.
 - <group>_checktag: checktag, and the implicit tag checks of loads and stores, with memory tagging enabled, with 4-bit
   and 7-bit tags. With Bare first-stage address translation (satp, or vsatp at V=1) in the effective privilege mode,
-  the scalar loads and stores of data that do not use sp as the base register are checked: a mismatch raises a
-  software-check exception (xtval 4) before the access, a fault of a tag load a load access fault. A data page has its
+  the regular accesses that do not use sp as the base register are checked: the scalar loads and stores of data,
+  LR/SC, AMOs, cbo.zero (its cache block) and vector loads and stores (each element), not prefetches, cbo.clean and
+  cbo.flush. A mismatch raises a software-check exception (xtval 4) before the access, a fault of a tag load a load
+  access fault. A data page has its
   tags in the tag table through the tag table base of the mode. Sm_checktag sweeps checktag between mismatching
   chunks, and checks each kind of load and store (integer, floating-point and compressed ones), misaligned ones over
-  two chunks, ones through sp and the ordering with older tag stores, none of which may raise an exception with memory
-  tagging enabled in M-mode, where the trap handler runs; then mismatches with MPRV, which check with S-mode's MT_MODE
-  and tag table, and not with mstatus.MTAG_I = 1. U_checktag and H_checktag (VS-mode, VU-mode) check the same, with
+  two chunks, ones through sp, the ordering with older tag stores, LR/SC, AMOs, cbo.zero and vector loads and stores,
+  none of which may raise an exception with memory tagging enabled in M-mode, where the trap handler runs; then
+  mismatches with MPRV, which check with S-mode's MT_MODE and tag table (also of LR/SC, AMOs, cbo.zero and vector
+  elements), and not with mstatus.MTAG_I = 1. U_checktag and H_checktag (VS-mode, VU-mode) check the same, with
   mismatches, and tag loads and data accesses that fault; S_checktag and H_checktag check checktag with address
   translation, its load page faults, guest-page faults and access faults. mstatus.MTAG_I without MPRV (S_checktag,
   whose software-check exceptions M-mode then takes) and hstatus.MTAG_I (H_checktag) leave the loads and stores of
@@ -53,7 +56,7 @@ Each group (Sm: M-mode, S: S-mode, U: U-mode, H: VS-mode and VU-mode, entered fr
   without it, with it and X = 1, user pages (which S-mode does not check, and U-mode does, through MPRV), loads and
   stores over two pages (with misaligned accesses performed byte by byte), also into an unmapped page, the
   tagcheck-exempt code pages (PTE.MTAG and X = 1, also execute-only), whose instructions' loads and stores are not
-  checked, and PTE.MTAG in a non-leaf PTE (a page fault) and with memory tagging disabled (ignored); H_checktag a
+  checked, LR/SC and AMOs of a tagged-data page and of a page with PTE.MTAG and X = 1, and PTE.MTAG in a non-leaf PTE (a page fault) and with memory tagging disabled (ignored); H_checktag a
   VS-stage page with and without PTE.MTAG, VS-stage code pages with and without it, VS-stage user pages through MPRV
   with MPV = 1, and a G-stage leaf PTE with it (a guest-page fault). With the G stage only (vsatp Bare), H_checktag
   checks that loads and stores are checked, with load guest-page faults of their tag loads. H_checktag also checks
@@ -1023,12 +1026,15 @@ def _fill_tags(base: int, pattern: int, window: list[int], base_offset: int = 0)
     return [f"sd x{pattern}, {offset - base_offset}(x{base})" for offset in window]
 
 
-def _record_tags(test_data: TestData, base: int, val: int, window: list[int], base_offset: int = 0) -> list[str]:
-    """Record the doublewords of window; x{base} holds the tag table base plus base_offset."""
+def _record_tags(
+    test_data: TestData, base: int, val: int, window: list[int], base_offset: int = 0, label: str | None = None
+) -> list[str]:
+    """Record the doublewords of window, labeled with label (default: the current testcase); x{base} holds the tag
+    table base plus base_offset."""
     return [
         line
         for offset in window
-        for line in (f"ld x{val}, {offset - base_offset}(x{base})", write_sigupd(val, test_data))
+        for line in (f"ld x{val}, {offset - base_offset}(x{base})", write_sigupd(val, test_data, label=label))
     ]
 
 
@@ -1596,6 +1602,17 @@ PAGE_CROSSING_GATE = "defined(UDB_MISALIGNED_LDST) && defined(UDB_MISALIGNED_SPL
 STANDARD_SM_GATE = "defined(STANDARD_SM_SUPPORTED)"
 # The data chunk of the accesses that implicit tag checks do not cover, which starts a cache block of 64 bytes
 UNCHECKED_CHUNK = 52
+# The data chunks of the regular accesses that implicit tag checks cover besides loads and stores (cp_checked_regular):
+# LR/SC on the first doubleword of REGULAR_CHUNK, amoadd.d on its second one and amoswap.w on the next chunk; vector
+# loads and stores on VECTOR_CHUNK and the next one (stride 16); and cbo.zero on the cache block of 64 bytes from
+# CBO_ZERO_CHUNK
+REGULAR_CHUNK = 56
+VECTOR_CHUNK = 58
+CBO_ZERO_CHUNK = 60
+# The doublewords of the cache block of cbo.zero before it, so that a cbo.zero that is not performed shows
+CBO_ZERO_PATTERN = 0x5A5A_5A5A_5A5A_5A5A
+# The doublewords of VECTOR_CHUNK and the next chunk before the MPRV vector accesses
+VECTOR_PATTERN = (0x5050505050505050, 0x5151515151515151, 0x5252525252525252, 0x5353535353535353)
 # Data chunk of the checktags with sp as rs1, and of the 7-bit tag with bit 7 set
 SP_CHECKTAG_CHUNK = 4
 # The loads and stores of the tests are assembled only for a config that supports them, and M is for the divisions of
@@ -1770,6 +1787,35 @@ def _record_via_sp(test_data: TestData, ptr: int, offset: int, val: int, save: i
         f"mv sp, x{save}",
         write_sigupd(val, test_data),
     ]
+
+
+def _fill_via_sp(ptr: int, val: int, save: int, values: tuple[tuple[int, int], ...]) -> list[str]:
+    """Store each (offset, value) of values as the doubleword at x{ptr} + offset, through sp as _record_via_sp."""
+    lines = [f"mv x{save}, sp", f"slli sp, x{ptr}, 7", "srli sp, sp, 7"]
+    for offset, value in values:
+        lines += [f"LI(x{val}, {value:#x})", f"sd x{val}, {offset}(sp)"]
+    return [*lines, f"mv sp, x{save}"]
+
+
+def _record_vreg(test_data: TestData, val: int, vreg: int, elements: int = 2) -> list[str]:
+    """Record the first elements (1 or 2) 64-bit elements of v{vreg}, element 1 through v25 (vl = 2)."""
+    lines = [
+        ".option push",
+        ".option arch, +v",
+        f"vmv.x.s x{val}, v{vreg}",
+        ".option pop",
+        write_sigupd(val, test_data),
+    ]
+    if elements > 1:
+        lines += [
+            ".option push",
+            ".option arch, +v",
+            f"vslidedown.vi v25, v{vreg}, 1",
+            f"vmv.x.s x{val}, v25",
+            ".option pop",
+            write_sigupd(val, test_data),
+        ]
+    return lines
 
 
 def _access_case(
@@ -2115,12 +2161,12 @@ def _order_tests(
 def _unchecked_access_tests(
     test_data: TestData, cg: str, mode: str, mt_mode: int, mt: tuple[list[str], list[str]] = NO_MT, m_mode: bool = False
 ) -> list[str]:
-    """Loads and stores that implicit tag checks do not cover, of data chunk UNCHECKED_CHUNK, whose tag is GOOD_TAG,
-    with a pointer tag that does not match: LR/SC and an AMO through a pointer with BAD_TAG and, in M-mode, CMOs and
-    HLV/HSV through one without a pointer tag (pointer masking need not apply to them), and vector loads and stores
-    (unit-stride, strided, indexed and masked, element 0 masked off) with BAD_TAG. HLV/HSV are checked with the
-    memory tagging of their guest mode, not M-mode's: VU-mode's (hstatus.SPVP = 0), senvcfg.MT_MODE, which stays
-    disabled here. No exception. Record the loaded values and memory."""
+    """Accesses that implicit tag checks do not cover, of data chunk UNCHECKED_CHUNK, whose tag is GOOD_TAG, with a
+    pointer tag that does not match: prefetch.r and prefetch.w through a pointer with BAD_TAG and, in M-mode, cbo.clean
+    and cbo.flush and HLV/HSV through one without a pointer tag (pointer masking need not apply to them). HLV/HSV are
+    checked with the memory tagging of their guest mode, not M-mode's: VU-mode's (hstatus.SPVP = 0), senvcfg.MT_MODE,
+    which stays disabled here. No exception. In M-mode, record the value that hlv.d loads and memory (the prefetches,
+    which access no memory, record nothing)."""
     name = MT_NAMES[mt_mode]
     mt_on, mt_off = mt
     ptr, val, tmp, save = test_data.int_regs.get_registers(4)
@@ -2137,48 +2183,34 @@ def _unchecked_access_tests(
         comment_banner(
             f"cp_unchecked_access ({mode}, {name})",
             f"In {mode}-mode with {TAG_BITS[mt_mode]}-bit tags, accesses that implicit tag checks do not cover, with a\n"
-            "pointer tag that does not match: LR/SC and an AMO"
+            "pointer tag that does not match: prefetches"
             + (
-                ", CMOs, HLV/HSV (whose VU-mode memory\ntagging is disabled) and vector loads and stores"
+                ", cbo.clean, cbo.flush and HLV/HSV (whose VU-mode memory\ntagging is disabled). No exception. Record "
+                "the value that hlv.d loads and memory"
                 if m_mode
-                else ""
-            )
-            + ". No exception. Record\nthe loaded values and memory",
+                else ". No exception"
+            ),
         ),
         *gated(
             [
                 *_check_pointer(ptr, tmp, mt_mode, UNCHECKED_CHUNK, BAD_TAG[mt_mode]),
-                f"LI(x{val}, {RD_CANARY:#x})",
-                *accesses([("lr", f"lr.d x{val}, (x{ptr})"), ("sc", f"sc.d x{tmp}, x{val}, (x{ptr})")], "+zalrsc"),
-                write_sigupd(val, test_data),
-                write_sigupd(tmp, test_data),
+                *accesses(
+                    [("prefetch_r", f"prefetch.r 0(x{ptr})"), ("prefetch_w", f"prefetch.w 0(x{ptr})")], "+zicbop"
+                ),
             ],
-            "defined(ZALRSC_SUPPORTED)",
-        ),
-        *gated(
-            [
-                *_check_pointer(ptr, tmp, mt_mode, UNCHECKED_CHUNK, BAD_TAG[mt_mode]),
-                f"LI(x{tmp}, 0x0101010101010101)",
-                *accesses([("amo", f"amoadd.d x{val}, x{tmp}, (x{ptr})")], "+zaamo"),
-                write_sigupd(val, test_data),
-                *_record_via_sp(test_data, ptr, 0, val, save),
-            ],
-            "defined(ZAAMO_SUPPORTED)",
+            "defined(ZICBOP_SUPPORTED)",
         ),
     ]
     if m_mode:
         lines += [
             f"LA(x{ptr}, {base})",
-            *gated(
-                accesses([("cbo_clean", f"cbo.clean (x{ptr})"), ("cbo_flush", f"cbo.flush (x{ptr})")], "+zicbom"),
-                "defined(ZICBOM_SUPPORTED)",
-            ),
+            # Each record is inside the gate of the testcase it is labeled with
             *gated(
                 [
-                    *accesses([("cbo_zero", f"cbo.zero (x{ptr})")], "+zicboz"),
+                    *accesses([("cbo_clean", f"cbo.clean (x{ptr})"), ("cbo_flush", f"cbo.flush (x{ptr})")], "+zicbom"),
                     *_record_via_sp(test_data, ptr, 0, val, save),
                 ],
-                "defined(ZICBOZ_SUPPORTED)",
+                "defined(ZICBOM_SUPPORTED)",
             ),
             # V-mode loads and stores with Bare translation (vsatp and hgatp) in the VU-mode of hstatus.SPVP = 0, whose
             # memory tagging (senvcfg.MT_MODE) is disabled: M-mode's does not apply to them
@@ -2191,50 +2223,501 @@ def _unchecked_access_tests(
                     f"LI(x{val}, 0x0123456789abcdef)",
                     *accesses([("hsv", f"hsv.d x{val}, (x{ptr})"), ("hlv", f"hlv.d x{tmp}, (x{ptr})")], "+h"),
                     write_sigupd(tmp, test_data),
+                    *_record_via_sp(test_data, ptr, 0, val, save),
                 ],
                 "defined(H_SUPPORTED)",
             ),
-            # Two 64-bit elements: at the pointer and 8 bytes on (unit-stride), or 16 bytes on (stride and indices 16)
-            *gated(
-                [
-                    f"LI(x{tmp}, MSTATUS_VS)",
-                    f"csrs mstatus, x{tmp}",
-                    ".option push",
-                    ".option arch, +v",
-                    "vsetivli x0, 2, e64, m1, ta, ma",
-                    f"LI(x{val}, 0x1122334455667788)",
-                    f"vmv.v.x v8, x{val}",
-                    "vid.v v16",
-                    "vsll.vi v16, v16, 4",
-                    "vmv.v.i v0, 2",
-                    ".option pop",
-                    *_check_pointer(ptr, tmp, mt_mode, UNCHECKED_CHUNK, BAD_TAG[mt_mode]),
-                    f"LI(x{tmp}, 16)",
-                    *accesses(
-                        [
-                            ("vse", f"vse64.v v8, (x{ptr})"),
-                            ("vsse", f"vsse64.v v8, (x{ptr}), x{tmp}"),
-                            ("vsuxei", f"vsuxei64.v v8, (x{ptr}), v16"),
-                            ("vse_masked", f"vse64.v v8, (x{ptr}), v0.t"),
-                            ("vle", f"vle64.v v24, (x{ptr})"),
-                            ("vlse", f"vlse64.v v24, (x{ptr}), x{tmp}"),
-                            ("vluxei", f"vluxei64.v v24, (x{ptr}), v16"),
-                        ],
-                        "+v",
-                    ),
-                    ".option push",
-                    ".option arch, +v",
-                    f"vmv.x.s x{val}, v24",
-                    ".option pop",
-                    write_sigupd(val, test_data),
-                    *_record_via_sp(test_data, ptr, 0, val, save),
-                    *_record_via_sp(test_data, ptr, 8, val, save),
-                    *_record_via_sp(test_data, ptr, 16, val, save),
-                ],
-                "defined(V_SUPPORTED)",
-            ),
         ]
     test_data.int_regs.return_registers([ptr, val, tmp, save])
+    return lines
+
+
+def _regular_access(
+    test_data: TestData,
+    cg: str,
+    coverpoint: str,
+    case: str,
+    arch: str,
+    instructions: list[str],
+    mt: tuple[list[str], list[str]] = NO_MT,
+) -> list[str]:
+    """instructions, assembled with the extensions arch between the lines of mt, the first one labeled as the testcase
+    case of coverpoint."""
+    mt_on, mt_off = mt
+    return [
+        ".option push",
+        f".option arch, {arch}",
+        *mt_on,
+        test_data.add_testcase(case, coverpoint, cg),
+        *instructions,
+        *mt_off,
+        ".option pop",
+    ]
+
+
+def _checked_regular_tests(
+    test_data: TestData,
+    cg: str,
+    mode: str,
+    mt_mode: int,
+    mismatch: bool,
+    mt: tuple[list[str], list[str]] = NO_MT,
+    m_mode: bool = False,
+) -> list[str]:
+    """The regular accesses that implicit tag checks cover besides loads and stores, of data chunks REGULAR_CHUNK and
+    the next one, whose tag is GOOD_TAG: with the matching pointer tag an LR/SC pair (which succeeds), amoadd.d and
+    amoswap.w are performed, and cbo.zero of the cache block of CBO_ZERO_CHUNK (filled with CBO_ZERO_PATTERN), through a
+    pointer into its second chunk; and, if mismatch, with BAD_TAG LR, SC (without a reservation, and after an LR through
+    the matching pointer tag), the AMOs and cbo.zero raise a software-check exception that writes neither rd nor
+    memory. In M-mode (m_mode) also vector loads and stores (unit-stride, masked, strided, indexed and fault-only-first)
+    of VECTOR_CHUNK and the next one, with the matching pointer tag. Record rd and memory."""
+    name = MT_NAMES[mt_mode]
+    ptr, good, val, tmp, save = test_data.int_regs.get_registers(5)
+
+    def access(case: str, arch: str, instructions: list[str]) -> list[str]:
+        return _regular_access(test_data, cg, "cp_checked_regular", f"{mode}_{name}_{case}", arch, instructions, mt)
+
+    lines = [
+        comment_banner(
+            f"cp_checked_regular ({mode}, {name})",
+            f"In {mode}-mode with {TAG_BITS[mt_mode]}-bit tags, the regular accesses that implicit tag checks cover\n"
+            "besides loads and stores, with the matching pointer tag: an LR/SC pair, amoadd.d, amoswap.w, cbo.zero"
+            + (" and\nvector loads and stores" if m_mode else "")
+            + ", performed"
+            + (
+                f". Then with a mismatching pointer tag: LR, SC (without\na reservation, and after an LR with the "
+                f"matching pointer tag), the AMOs and cbo.zero: {SW_CHECK_TEXT},\nrd and memory unchanged"
+                if mismatch
+                else ""
+            )
+            + ". Record rd and memory",
+        ),
+    ]
+    lr_sc = [
+        *_check_pointer(good, tmp, mt_mode, REGULAR_CHUNK, GOOD_TAG[mt_mode]),
+        f"LI(x{val}, {RD_CANARY:#x})",
+        f"LI(x{save}, 0x0123456789abcdef)",
+        *access("lr_sc", "+zalrsc", [f"lr.d x{val}, (x{good})", f"sc.d x{tmp}, x{save}, (x{good})"]),
+        write_sigupd(val, test_data),
+        write_sigupd(tmp, test_data),
+        *_record_via_sp(test_data, good, 0, val, save),
+    ]
+    amo = [
+        *_check_pointer(good, tmp, mt_mode, REGULAR_CHUNK, GOOD_TAG[mt_mode], 8),
+        f"LI(x{val}, {RD_CANARY:#x})",
+        f"LI(x{tmp}, 0x0101010101010101)",
+        *access("amoadd_d", "+zaamo", [f"amoadd.d x{val}, x{tmp}, (x{good})"]),
+        write_sigupd(val, test_data),
+        *_record_via_sp(test_data, good, 0, val, save),
+        *_check_pointer(good, tmp, mt_mode, REGULAR_CHUNK + 1, GOOD_TAG[mt_mode], 4),
+        f"LI(x{val}, {RD_CANARY:#x})",
+        f"LI(x{tmp}, 0x55aa55aa)",
+        *access("amoswap_w", "+zaamo", [f"amoswap.w x{val}, x{tmp}, (x{good})"]),
+        write_sigupd(val, test_data),
+        *_record_via_sp(test_data, good, -4, val, save),
+    ]
+    if mismatch:
+        lr_sc += [
+            *_check_pointer(ptr, tmp, mt_mode, REGULAR_CHUNK, BAD_TAG[mt_mode]),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *access("lr_mismatch", "+zalrsc", [f"lr.d x{val}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+            f"LI(x{tmp}, {RD_CANARY:#x})",
+            f"LI(x{save}, 0xfedcba9876543210)",
+            *access("sc_mismatch", "+zalrsc", [f"sc.d x{tmp}, x{save}, (x{ptr})"]),
+            write_sigupd(tmp, test_data),
+            *_check_pointer(good, tmp, mt_mode, REGULAR_CHUNK, GOOD_TAG[mt_mode]),
+            f"LI(x{tmp}, {RD_CANARY:#x})",
+            *access("lr_sc_mismatch", "+zalrsc", [f"lr.d x{val}, (x{good})", f"sc.d x{tmp}, x{save}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+            write_sigupd(tmp, test_data),
+            *_record_via_sp(test_data, good, 0, val, save),
+        ]
+        amo += [
+            *_check_pointer(ptr, tmp, mt_mode, REGULAR_CHUNK, BAD_TAG[mt_mode], 8),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, 0x0101010101010101)",
+            *access("amoadd_d_mismatch", "+zaamo", [f"amoadd.d x{val}, x{tmp}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, ptr, 0, val, save),
+            *_check_pointer(ptr, tmp, mt_mode, REGULAR_CHUNK + 1, BAD_TAG[mt_mode], 4),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, 0x33cc33cc)",
+            *access("amoswap_w_mismatch", "+zaamo", [f"amoswap.w x{val}, x{tmp}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, ptr, -4, val, save),
+        ]
+    lines += [*gated(lr_sc, "defined(ZALRSC_SUPPORTED)"), *gated(amo, "defined(ZAAMO_SUPPORTED)")]
+
+    def cbo_zero(case: str, tag: int) -> list[str]:
+        """The cache block of CBO_ZERO_CHUNK filled with CBO_ZERO_PATTERN, then cbo.zero through a pointer into its second
+        chunk with the pointer tag tag. Record the block."""
+        return [
+            *_check_pointer(ptr, tmp, mt_mode, CBO_ZERO_CHUNK + 1, tag, 4),
+            f"LA(x{tmp}, {CHECK_DATA} + {16 * CBO_ZERO_CHUNK})",
+            *_fill_via_sp(tmp, val, save, tuple((dword, CBO_ZERO_PATTERN) for dword in range(0, 64, 8))),
+            *access(case, "+zicboz", [f"cbo.zero (x{ptr})"]),
+            *[line for dword in range(0, 64, 8) for line in _record_via_sp(test_data, tmp, dword, val, save)],
+        ]
+
+    lines += gated(
+        [
+            *cbo_zero("cbo_zero", GOOD_TAG[mt_mode]),
+            *(cbo_zero("cbo_zero_mismatch", BAD_TAG[mt_mode]) if mismatch else []),
+        ],
+        "defined(ZICBOZ_SUPPORTED)",
+    )
+    if m_mode:
+
+        def records(*offsets: int) -> list[str]:
+            return [line for offset in offsets for line in _record_via_sp(test_data, good, offset, val, save)]
+
+        def vload(case: str, instruction: str) -> list[str]:
+            """v24 = RD_CANARY, then instruction: record both elements of v24."""
+            return [
+                f"LI(x{val}, {RD_CANARY:#x})",
+                ".option push",
+                ".option arch, +v",
+                f"vmv.v.x v24, x{val}",
+                ".option pop",
+                *access(case, "+v", [instruction]),
+                *_record_vreg(test_data, val, 24),
+            ]
+
+        # Two 64-bit elements: at the pointer and 8 bytes on (unit-stride), 16 bytes on (stride and indices 0, 16), or at
+        # 8 and 24 (indices). Each store has data of its own (v8-v11), and memory is recorded after it; vd holds a
+        # canary before each load, and a masked load leaves its masked-off element undisturbed (mu)
+        lines += gated(
+            [
+                f"LI(x{tmp}, MSTATUS_VS)",
+                f"csrs mstatus, x{tmp}",
+                ".option push",
+                ".option arch, +v",
+                "vsetivli x0, 2, e64, m1, ta, mu",
+                f"LI(x{val}, 0x1122334455667788)",
+                f"vmv.v.x v8, x{val}",
+                "vid.v v16",
+                "vsll.vi v16, v16, 4",
+                "vadd.vv v8, v8, v16",
+                "vadd.vi v9, v8, 1",
+                "vadd.vi v10, v8, 2",
+                "vadd.vi v11, v8, 3",
+                "vadd.vi v17, v16, 8",
+                "vmv.v.i v0, 1",
+                ".option pop",
+                *_check_pointer(good, tmp, mt_mode, VECTOR_CHUNK, GOOD_TAG[mt_mode]),
+                *_fill_via_sp(good, val, save, ((0, 0), (8, 0), (16, 0), (24, 0))),
+                f"LI(x{tmp}, 16)",
+                *access("vse", "+v", [f"vse64.v v8, (x{good})"]),
+                *records(0, 8),
+                *access("vsse", "+v", [f"vsse64.v v9, (x{good}), x{tmp}"]),
+                *records(0, 8, 16),
+                *access("vsuxei", "+v", [f"vsuxei64.v v10, (x{good}), v16"]),
+                *records(0, 16),
+                *access("vse_masked", "+v", [f"vse64.v v11, (x{good}), v0.t"]),
+                *records(0, 8),
+                *vload("vle", f"vle64.v v24, (x{good})"),
+                *vload("vle_masked", f"vle64.v v24, (x{good}), v0.t"),
+                *vload("vlse", f"vlse64.v v24, (x{good}), x{tmp}"),
+                *vload("vluxei", f"vluxei64.v v24, (x{good}), v17"),
+                *vload("vleff", f"vle64ff.v v24, (x{good})"),
+                f"csrr x{val}, vl",
+                write_sigupd(val, test_data),
+            ],
+            "defined(V_SUPPORTED)",
+        )
+    test_data.int_regs.return_registers([ptr, good, val, tmp, save])
+    return lines
+
+
+def _m_checked_mprv_regular_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
+    """The regular accesses that implicit tag checks cover besides loads and stores, in M-mode with mstatus.MPRV = 1 and
+    MPP = S: checked with the MT_MODE (menvcfg) and tag table (svitts) of S-mode, whose address translation is Bare,
+    while mseccfg.MT_MODE = 00. LR/SC, amoadd.d, amoswap.w and cbo.zero with a mismatching pointer tag raise a
+    software-check exception, which M-mode takes, that writes neither rd nor memory, and with the matching one are
+    performed; cbo.zero whose block mismatches only in its last chunk, through a pointer with the matching tag into its
+    first chunk, raises one too. A misaligned LR and AMO with a mismatching pointer tag raise one, as the tag check
+    comes before their address-misaligned exception (Bare translation). Vector loads and stores: vle64.v, vse64.v and
+    vle64ff.v with a mismatching pointer tag raise one at element 0, and, with the tag of chunk VECTOR_CHUNK + 1
+    mismatching, vsse64.v with stride 16 raises one at element 1 after storing element 0 (vstart = 1), and vle64ff.v
+    from VECTOR_CHUNK + 8 trims vl to 1; masked unit-stride, strided and indexed loads and stores whose element 1 is
+    there: not checked when it is masked off, a software-check exception at element 1 when it is active (and the
+    unmasked strided and indexed ones). Record rd, memory, vd, vstart and vl."""
+    name = MT_NAMES[mt_mode]
+    ptr, good, val, tmp, mprv, save = test_data.int_regs.get_registers(6)
+    mt = f"{mt_mode << MT_MODE_LSB:#x}"
+    good_tag, bad_tag = GOOD_TAG[mt_mode], BAD_TAG[mt_mode]
+
+    def with_mprv(case: str, arch: str, instructions: list[str]) -> list[str]:
+        return _regular_access(
+            test_data,
+            cg,
+            "cp_checked_regular_mprv",
+            f"M_{name}_mprv_{case}",
+            arch,
+            instructions,
+            ([f"csrs mstatus, x{mprv}"], [f"csrc mstatus, x{mprv}"]),
+        )
+
+    def set_chunk_tag(chunk: int, tag: int) -> list[str]:
+        """The tag of data chunk chunk, the other chunk of its tag byte keeping good_tag with 4-bit tags (x{save} holds
+        the address of the tag of data chunk 0)."""
+        if mt_mode == MT_TAG7:
+            return [f"LI(x{tmp}, {tag:#x})", f"sb x{tmp}, {chunk}(x{save})"]
+        byte = good_tag | (tag << 4) if chunk % 2 else tag | (good_tag << 4)
+        return [f"LI(x{tmp}, {byte:#x})", f"sb x{tmp}, {chunk // 2}(x{save})"]
+
+    def set_vector_tag(tag: int) -> list[str]:
+        """The tag of chunk VECTOR_CHUNK + 1."""
+        return set_chunk_tag(VECTOR_CHUNK + 1, tag)
+
+    lines = [
+        comment_banner(
+            f"cp_checked_regular_mprv (M, {name})",
+            f"In M-mode with mstatus.MPRV = 1 and MPP = S, and {TAG_BITS[mt_mode]}-bit tags in S-mode (menvcfg.MT_MODE,\n"
+            "svitts) and memory tagging disabled in M-mode: LR/SC, AMOs and cbo.zero with a mismatching pointer tag:\n"
+            f"{SW_CHECK_TEXT}, which M-mode takes, rd and memory unchanged; with the matching\n"
+            "one: performed; cbo.zero mismatching only in the last chunk of its block, and a misaligned LR and AMO with\n"
+            "a mismatching pointer tag (checked before their misaligned exception): the same exception. Vector loads\n"
+            "and stores: element 0 mismatching, or element 1 of a strided store and of a fault-only-first load (vstart\n"
+            "= 1, vl = 1); masked, strided and indexed forms whose element 1 mismatches: not checked when it is masked\n"
+            "off, the exception at element 1 when it is active. Record rd, memory, vd, vstart and vl",
+        ),
+        *_check_vitt("CSR_SVITTS", mt_mode, (mprv, tmp, val)),
+        *_set_pmm(tmp, "SMNPM"),
+        f"LI(x{val}, {mt})",
+        f"or x{tmp}, x{tmp}, x{val}",
+        f"csrs menvcfg, x{tmp}",
+        f"LI(x{tmp}, MSTATUS_MPP)",
+        f"csrc mstatus, x{tmp}",
+        f"LI(x{mprv}, MSTATUS_MPRV | {1 << 11:#x})    # MPP = S",
+        *_check_pointer(good, tmp, mt_mode, REGULAR_CHUNK, good_tag),
+        *_check_pointer(ptr, tmp, mt_mode, REGULAR_CHUNK, bad_tag),
+    ]
+    lines += gated(
+        [
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *with_mprv("lr_mismatch", "+zalrsc", [f"lr.d x{val}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+            f"LI(x{tmp}, {RD_CANARY:#x})",
+            f"LI(x{val}, 0xfedcba9876543210)",
+            *with_mprv("sc_mismatch", "+zalrsc", [f"sc.d x{tmp}, x{val}, (x{ptr})"]),
+            write_sigupd(tmp, test_data),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, 0x0123456789abcdef)",
+            *with_mprv("lr_sc", "+zalrsc", [f"lr.d x{val}, (x{good})", f"sc.d x{tmp}, x{tmp}, (x{good})"]),
+            write_sigupd(val, test_data),
+            write_sigupd(tmp, test_data),
+            *_record_via_sp(test_data, good, 0, val, tmp),
+        ],
+        "defined(ZALRSC_SUPPORTED)",
+    )
+    lines += gated(
+        [
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, 0x0101010101010101)",
+            *with_mprv("amoadd_d_mismatch", "+zaamo", [f"amoadd.d x{val}, x{tmp}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+            *with_mprv("amoadd_d", "+zaamo", [f"amoadd.d x{val}, x{tmp}, (x{good})"]),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, good, 0, val, tmp),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, 0x33cc33cc)",
+            *with_mprv("amoswap_w_mismatch", "+zaamo", [f"amoswap.w x{val}, x{tmp}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+            *with_mprv("amoswap_w", "+zaamo", [f"amoswap.w x{val}, x{tmp}, (x{good})"]),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, good, 0, val, tmp),
+        ],
+        "defined(ZAAMO_SUPPORTED)",
+    )
+    # A misaligned LR and AMO (REGULAR_CHUNK + 4) with a mismatching pointer tag: with Bare translation their tag check
+    # comes before their address-misaligned exception
+    lines += gated(
+        [
+            *_check_pointer(ptr, tmp, mt_mode, REGULAR_CHUNK, bad_tag, 4),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *with_mprv("lr_misaligned_mismatch", "+zalrsc", [f"lr.d x{val}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+        ],
+        "defined(ZALRSC_SUPPORTED)",
+    )
+    lines += gated(
+        [
+            *_check_pointer(ptr, tmp, mt_mode, REGULAR_CHUNK, bad_tag, 4),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, 0x0101010101010101)",
+            *with_mprv("amoadd_d_misaligned_mismatch", "+zaamo", [f"amoadd.d x{val}, x{tmp}, (x{ptr})"]),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, ptr, -4, val, save),
+            *_record_via_sp(test_data, ptr, 4, val, save),
+        ],
+        "defined(ZAAMO_SUPPORTED)",
+    )
+    # cbo.zero: a pattern in the block, through sp, then a mismatching pointer tag (no byte zeroed) and the matching one
+    lines += gated(
+        [
+            *_check_pointer(ptr, tmp, mt_mode, CBO_ZERO_CHUNK, bad_tag),
+            *_check_pointer(good, tmp, mt_mode, CBO_ZERO_CHUNK, good_tag),
+            f"LI(x{val}, {CBO_ZERO_PATTERN:#x})",
+            f"mv x{save}, sp",
+            f"LA(sp, {CHECK_DATA} + {16 * CBO_ZERO_CHUNK})",
+            *[f"sd x{val}, {dword}(sp)" for dword in range(0, 64, 8)],
+            f"mv sp, x{save}",
+            *with_mprv("cbo_zero_mismatch", "+zicboz", [f"cbo.zero (x{ptr})"]),
+            *[line for dword in (0, 56) for line in _record_via_sp(test_data, good, dword, val, save)],
+            *with_mprv("cbo_zero", "+zicboz", [f"cbo.zero (x{good})"]),
+            *[line for dword in (0, 56) for line in _record_via_sp(test_data, good, dword, val, save)],
+            # Only the last chunk of the block mismatching, through a pointer into its first chunk with the matching tag
+            *_fill_via_sp(good, val, save, tuple((dword, CBO_ZERO_PATTERN) for dword in range(0, 64, 8))),
+            *_check_tags(mt_mode, save, tmp),
+            *set_chunk_tag(CBO_ZERO_CHUNK + 3, bad_tag),
+            *with_mprv("cbo_zero_last_chunk_mismatch", "+zicboz", [f"cbo.zero (x{good})"]),
+            *set_chunk_tag(CBO_ZERO_CHUNK + 3, good_tag),
+            *[line for dword in (0, 56) for line in _record_via_sp(test_data, good, dword, val, save)],
+        ],
+        "defined(ZICBOZ_SUPPORTED)",
+    )
+
+    def records(*offsets: int) -> list[str]:
+        return [line for offset in offsets for line in _record_via_sp(test_data, good, offset, val, save)]
+
+    def canary() -> list[str]:
+        return [
+            f"LI(x{val}, {RD_CANARY:#x})",
+            ".option push",
+            ".option arch, +v",
+            f"vmv.v.x v24, x{val}",
+            ".option pop",
+        ]
+
+    def vstart() -> list[str]:
+        """Record vstart, and clear it."""
+        return [f"csrr x{val}, vstart", write_sigupd(val, test_data), "csrw vstart, x0"]
+
+    def vector(*instructions: str) -> list[str]:
+        return [".option push", ".option arch, +v", *instructions, ".option pop"]
+
+    # A pattern in the doublewords at good + 0, 8, 16 and 24 (through sp), and data of its own for each store (v8-v10).
+    # A load that traps may write vd, so vd is recorded after the others only, which first get a canary in it
+    lines += gated(
+        [
+            f"LI(x{tmp}, MSTATUS_VS)",
+            f"csrs mstatus, x{tmp}",
+            ".option push",
+            ".option arch, +v",
+            "vsetivli x0, 2, e64, m1, ta, ma",
+            f"LI(x{val}, 0x0f0e0d0c0b0a0908)",
+            f"vmv.v.x v8, x{val}",
+            "vid.v v9",
+            "vadd.vv v8, v8, v9",
+            "vadd.vi v9, v8, 2",
+            "vadd.vi v10, v8, 4",
+            ".option pop",
+            *_check_pointer(ptr, tmp, mt_mode, VECTOR_CHUNK, bad_tag),
+            *_check_pointer(good, tmp, mt_mode, VECTOR_CHUNK, good_tag),
+            *_fill_via_sp(good, val, save, tuple((8 * i, VECTOR_PATTERN[i]) for i in range(4))),
+            *with_mprv("vle_mismatch", "+v", [f"vle64.v v24, (x{ptr})"]),
+            *canary(),
+            *with_mprv("vle", "+v", [f"vle64.v v24, (x{good})"]),
+            *_record_vreg(test_data, val, 24),
+            *with_mprv("vse_mismatch", "+v", [f"vse64.v v8, (x{ptr})"]),
+            *records(0, 8),
+            *with_mprv("vse", "+v", [f"vse64.v v8, (x{good})"]),
+            *records(0, 8),
+            *with_mprv("vleff_mismatch", "+v", [f"vle64ff.v v24, (x{ptr})"]),
+            f"csrr x{val}, vl",
+            write_sigupd(val, test_data),
+            # The tag of chunk VECTOR_CHUNK + 1 mismatching (M-mode does not check its own stores here)
+            *_check_tags(mt_mode, save, tmp),
+            *set_vector_tag(bad_tag),
+            f"LI(x{tmp}, 16)",
+            *with_mprv("vsse_partial", "+v", [f"vsse64.v v9, (x{good}), x{tmp}"]),
+            f"csrr x{val}, vstart",
+            write_sigupd(val, test_data),
+            "csrw vstart, x0",
+            *canary(),
+            f"addi x{val}, x{good}, 8",
+            *with_mprv("vleff_trimmed", "+v", [f"vle64ff.v v24, (x{val})"]),
+            f"csrr x{val}, vl",
+            write_sigupd(val, test_data),
+            *_record_vreg(test_data, val, 24, 1),
+            *set_vector_tag(good_tag),
+            # vsse_partial stored element 0 at good + 0, and not element 1 at good + 16
+            *records(0, 16),
+            ".option push",
+            ".option arch, +v",
+            "vsetivli x0, 2, e64, m1, ta, ma",
+            ".option pop",
+            f"LI(x{tmp}, 16)",
+            *with_mprv("vsse", "+v", [f"vsse64.v v10, (x{good}), x{tmp}"]),
+            *records(0, 8, 16),
+            *canary(),
+            *with_mprv("vleff", "+v", [f"vle64ff.v v24, (x{good})"]),
+            f"csrr x{val}, vl",
+            write_sigupd(val, test_data),
+            *_record_vreg(test_data, val, 24),
+            # Masked, strided and indexed forms whose element 1 is in chunk VECTOR_CHUNK + 1, with its tag mismatching:
+            # masked off (v0 = 1), not checked; active (v0 = 2, or unmasked), a software-check exception at element 1
+            # (vstart = 1). The unit-stride ones from good + 8 (x{ptr}), the indexed ones with indices 0 and 16 (v16),
+            # the stores with data of their own (v9-v12) over the pattern
+            *vector(
+                "vsetivli x0, 2, e64, m1, ta, mu",
+                "vid.v v16",
+                "vsll.vi v16, v16, 4",
+                "vadd.vi v11, v8, 6",
+                "vadd.vi v12, v8, 8",
+                "vmv.v.i v0, 1",
+            ),
+            f"addi x{ptr}, x{good}, 8",
+            *_fill_via_sp(good, val, save, tuple((8 * i, VECTOR_PATTERN[i]) for i in range(4))),
+            *_check_tags(mt_mode, save, tmp),
+            *set_vector_tag(bad_tag),
+            *canary(),
+            *with_mprv("vle_masked", "+v", [f"vle64.v v24, (x{ptr}), v0.t"]),
+            *_record_vreg(test_data, val, 24),
+            *canary(),
+            f"LI(x{tmp}, 16)",
+            *with_mprv("vlse_masked", "+v", [f"vlse64.v v24, (x{good}), x{tmp}, v0.t"]),
+            *_record_vreg(test_data, val, 24),
+            *canary(),
+            *with_mprv("vluxei_masked", "+v", [f"vluxei64.v v24, (x{good}), v16, v0.t"]),
+            *_record_vreg(test_data, val, 24),
+            *with_mprv("vse_masked", "+v", [f"vse64.v v11, (x{ptr}), v0.t"]),
+            *records(8, 16),
+            f"LI(x{tmp}, 16)",
+            *with_mprv("vsse_masked", "+v", [f"vsse64.v v12, (x{good}), x{tmp}, v0.t"]),
+            *records(0, 16),
+            *with_mprv("vsuxei_masked", "+v", [f"vsuxei64.v v10, (x{good}), v16, v0.t"]),
+            *records(0, 16),
+            *vector("vmv.v.i v0, 2"),
+            *with_mprv("vle_masked_mismatch", "+v", [f"vle64.v v24, (x{ptr}), v0.t"]),
+            *vstart(),
+            *with_mprv("vse_masked_mismatch", "+v", [f"vse64.v v12, (x{ptr}), v0.t"]),
+            *vstart(),
+            *records(8, 16),
+            f"LI(x{tmp}, 16)",
+            *with_mprv("vlse_partial", "+v", [f"vlse64.v v24, (x{good}), x{tmp}"]),
+            *vstart(),
+            *with_mprv("vluxei_partial", "+v", [f"vluxei64.v v24, (x{good}), v16"]),
+            *vstart(),
+            *with_mprv("vsuxei_partial", "+v", [f"vsuxei64.v v9, (x{good}), v16"]),
+            *vstart(),
+            *records(0, 16),
+            *_check_tags(mt_mode, save, tmp),
+            *set_vector_tag(good_tag),
+            *vector("vsetivli x0, 2, e64, m1, ta, ma"),
+        ],
+        "defined(V_SUPPORTED)",
+    )
+    lines += [
+        f"LI(x{tmp}, {mt})",
+        f"csrc menvcfg, x{tmp}",
+        f"LI(x{tmp}, {0b11 << PMM_LSB:#x})",
+        f"csrc menvcfg, x{tmp}",
+        "csrw CSR_SVITTS, x0",
+    ]
+    test_data.int_regs.return_registers([ptr, good, val, tmp, mprv, save])
     return lines
 
 
@@ -2816,6 +3299,9 @@ MTAG_DATA = "zimt_mtag_data"
 MTAG_TAGS = "zimt_mtag_tags"
 MTAG_CODE = "zimt_mtag_code"
 MTAG_TAGGED_FLAGS = PteFlags(execute=False, extra=(PTE_MTAG,))
+# The chunk of the LR/SC and AMO tests in the pages of MTAG_PAGES, and the cache block (chunks 4-7) of the cbo.zero ones
+MTAG_REGULAR_OFFSET = 0x30
+MTAG_CBO_ZERO_OFFSET = 0x40
 MTAG_EXEMPT_FLAGS = PteFlags(write=False, extra=(PTE_MTAG,))
 MTAG_PAGES = {
     # A tagged-data page; one without PTE.MTAG after it; a user tagged-data page, which supervisor accesses do not
@@ -3021,6 +3507,126 @@ def _s_mtag_tests(test_data: TestData, cg: str, mt_mode: int, code: tuple[int, i
         *store("user_store", "cp_unchecked_page", 0x5555_6666_7777_8888),
         *sum_off,
         *record(0x28),
+    ]
+
+    def regular(
+        case: str, coverpoint: str, page: str, pointer_tag: int, arch: str, instructions: list[str]
+    ) -> list[str]:
+        """ptr = a pointer to MTAG_REGULAR_OFFSET in page with pointer_tag, val = RD_CANARY, then instructions (LR/SC or
+        an AMO), assembled with arch. Record val."""
+        return [
+            f"LI(x{ptr}, {_mtag_pointer(page, MTAG_REGULAR_OFFSET, pointer_tag, mt_mode):#x})",
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *_regular_access(test_data, cg, coverpoint, f"S_{name}_{case}", arch, instructions),
+            write_sigupd(val, test_data),
+        ]
+
+    def cbo_zero(case: str, coverpoint: str, page: str, offset: int, pointer_tag: int) -> list[str]:
+        """The cache block at MTAG_CBO_ZERO_OFFSET filled with CBO_ZERO_PATTERN (through the identity mapping), then
+        cbo.zero through a pointer to offset in page with pointer_tag. Record its first and last doublewords."""
+        return [
+            f"LA(x{addr}, {MTAG_DATA} + {MTAG_CBO_ZERO_OFFSET:#x})",
+            f"LI(x{tmp}, {CBO_ZERO_PATTERN:#x})",
+            *[f"sd x{tmp}, {dword}(x{addr})" for dword in range(0, 64, 8)],
+            f"LI(x{ptr}, {_mtag_pointer(page, offset, pointer_tag, mt_mode):#x})",
+            *_regular_access(test_data, cg, coverpoint, f"S_{name}_{case}", "+zicboz", [f"cbo.zero (x{ptr})"]),
+            *record(MTAG_CBO_ZERO_OFFSET),
+            *record(MTAG_CBO_ZERO_OFFSET + 0x38),
+        ]
+
+    tagged, unchecked = "cp_checked_regular_tagged_page", "cp_unchecked_regular_page"
+    # The SC stores the loaded value plus 1, so that the recorded memory shows that it is performed
+    lr_sc = [f"lr.d x{tmp}, (x{ptr})", f"addi x{tmp}, x{tmp}, 1", f"sc.d x{val}, x{tmp}, (x{ptr})"]
+    lines += [
+        comment_banner(
+            f"cp_checked_regular_tagged_page, cp_unchecked_regular_page (S, {name})",
+            "LR, SC, the AMOs amoadd.d and amoswap.w and cbo.zero of the tagged-data page with a mismatching pointer\n"
+            f"tag (cbo.zero also with only the last chunk of its block mismatching): {SW_CHECK_TEXT},\n"
+            "rd and memory unchanged; with the matching one, an LR/SC pair, the AMOs and cbo.zero: performed. With a\n"
+            "mismatching one, of the page with PTE.MTAG = 1 and X = 1: not checked. A misaligned amoadd.d with a\n"
+            "mismatching pointer tag: its address-misaligned exception comes first, not checked. Record rd and memory",
+        ),
+        *tag("tagged", MTAG_REGULAR_OFFSET, good),
+        *tag("executable", MTAG_REGULAR_OFFSET, good),
+        *gated(
+            [
+                *regular("tagged_lr_mismatch", tagged, "tagged", bad, "+zalrsc", [f"lr.d x{val}, (x{ptr})"]),
+                *regular("tagged_sc_mismatch", tagged, "tagged", bad, "+zalrsc", [f"sc.d x{val}, x{val}, (x{ptr})"]),
+                *record(MTAG_REGULAR_OFFSET),
+                *regular("tagged_lr_sc", tagged, "tagged", good, "+zalrsc", lr_sc),
+                *record(MTAG_REGULAR_OFFSET),
+                *regular("executable_lr_sc", unchecked, "executable", bad, "+zalrsc", lr_sc),
+                *record(MTAG_REGULAR_OFFSET),
+            ],
+            "defined(ZALRSC_SUPPORTED)",
+        ),
+        *gated(
+            [
+                *regular(
+                    "tagged_amoadd_d_mismatch", tagged, "tagged", bad, "+zaamo", [f"amoadd.d x{val}, x{val}, (x{ptr})"]
+                ),
+                *regular(
+                    "tagged_amoswap_w_mismatch",
+                    tagged,
+                    "tagged",
+                    bad,
+                    "+zaamo",
+                    [f"amoswap.w x{val}, x{val}, (x{ptr})"],
+                ),
+                *record(MTAG_REGULAR_OFFSET),
+                *regular("tagged_amoadd_d", tagged, "tagged", good, "+zaamo", [f"amoadd.d x{val}, x{val}, (x{ptr})"]),
+                *regular("tagged_amoswap_w", tagged, "tagged", good, "+zaamo", [f"amoswap.w x{val}, x{val}, (x{ptr})"]),
+                *regular(
+                    "executable_amoadd_d",
+                    unchecked,
+                    "executable",
+                    bad,
+                    "+zaamo",
+                    [f"amoadd.d x{val}, x{val}, (x{ptr})"],
+                ),
+                *regular(
+                    "executable_amoswap_w",
+                    unchecked,
+                    "executable",
+                    bad,
+                    "+zaamo",
+                    [f"amoswap.w x{val}, x{val}, (x{ptr})"],
+                ),
+                *record(MTAG_REGULAR_OFFSET),
+                # A misaligned AMO: with first-stage paging its address-misaligned exception (or, where misaligned AMOs
+                # are supported, the access) comes before the tag check
+                f"LI(x{ptr}, {_mtag_pointer('tagged', MTAG_REGULAR_OFFSET + 4, bad, mt_mode):#x})",
+                f"LI(x{val}, {RD_CANARY:#x})",
+                *_regular_access(
+                    test_data,
+                    cg,
+                    tagged,
+                    f"S_{name}_tagged_amoadd_d_misaligned_mismatch",
+                    "+zaamo",
+                    [f"amoadd.d x{val}, x{val}, (x{ptr})"],
+                ),
+                write_sigupd(val, test_data),
+                *record(MTAG_REGULAR_OFFSET),
+                *record(MTAG_REGULAR_OFFSET + 8),
+            ],
+            "defined(ZAAMO_SUPPORTED)",
+        ),
+        *gated(
+            [
+                *[
+                    line
+                    for offset in range(MTAG_CBO_ZERO_OFFSET, MTAG_CBO_ZERO_OFFSET + 64, 16)
+                    for line in tag("tagged", offset, good)
+                ],
+                *cbo_zero("tagged_cbo_zero_mismatch", tagged, "tagged", MTAG_CBO_ZERO_OFFSET + 0x10, bad),
+                *tag("tagged", MTAG_CBO_ZERO_OFFSET + 0x30, bad),
+                *cbo_zero("tagged_cbo_zero_last_chunk_mismatch", tagged, "tagged", MTAG_CBO_ZERO_OFFSET, good),
+                *tag("tagged", MTAG_CBO_ZERO_OFFSET + 0x30, good),
+                *cbo_zero("tagged_cbo_zero", tagged, "tagged", MTAG_CBO_ZERO_OFFSET + 0x10, good),
+                *cbo_zero("executable_cbo_zero", unchecked, "executable", MTAG_CBO_ZERO_OFFSET + 0x10, bad),
+            ],
+            "defined(ZICBOZ_SUPPORTED)",
+        ),
     ]
     if mt_mode == MT_TAG4:
         lines += [
@@ -4267,6 +4873,8 @@ def make_zimt_u_settag(test_data: TestData) -> list[TestChunk]:
         iteration += _vitt_settag_tests(test_data, cg, "U", mt_mode, "cp_settag_mt_enabled")
         base, val, tmp = test_data.int_regs.get_registers(3)
         fault_chunk = f"({FAULT_TAG} & 0xfff)" if mt_mode == MT_TAG7 else f"(2 * ({FAULT_TAG} & 0xfff) + 1)"
+        # The records follow the gated access-fault case: label them with a testcase outside the gate
+        record_label = test_data.current_testcase_label
         iteration += gated(
             [
                 "RVTEST_TSBI_GOTO_SMODE",
@@ -4285,7 +4893,7 @@ def make_zimt_u_settag(test_data: TestData) -> list[TestChunk]:
             f"csrc senvcfg, x{val}",
             "csrw CSR_SVITTU, x0",
             f"LA(x{base}, {TAG_TABLE})",
-            *_record_tags(test_data, base, val, window),
+            *_record_tags(test_data, base, val, window, label=record_label),
             "RVTEST_TSBI_GOTO_UMODE",
         ]
         test_data.int_regs.return_registers([base, val, tmp])
@@ -4585,7 +5193,7 @@ def _bare_check_tests(
     """The tests of a mode with Bare translation and memory tagging enabled, whose exceptions a mode with memory
     tagging disabled takes: checktag around BAD_CHUNKS, each kind of load and store, misaligned ones over two chunks,
     ones with sp as the base register, the ordering of tag accesses, accesses that implicit tag checks do not cover,
-    checktag with sp as rs1, and with 7-bit tags a memory tag with bit 7 set."""
+    LR/SC and AMOs, checktag with sp as rs1, and with 7-bit tags a memory tag with bit 7 set."""
     name = MT_NAMES[mt_mode]
     return [
         comment_banner(
@@ -4600,6 +5208,7 @@ def _bare_check_tests(
         *_sp_base_tests(test_data, cg, mode, mt_mode, fp=fp),
         *_order_tests(test_data, cg, mode, mt_mode, True),
         *_unchecked_access_tests(test_data, cg, mode, mt_mode),
+        *_checked_regular_tests(test_data, cg, mode, mt_mode, True),
         *_checktag_sp_tests(test_data, cg, mode, mt_mode, True),
         *(_tag_bit7_tests(test_data, cg, mode) if mt_mode == MT_TAG7 else []),
     ]
@@ -4723,10 +5332,12 @@ def make_zimt_sm_checktag(test_data: TestData) -> list[TestChunk]:
             *_sp_base_tests(test_data, cg, "M", mt_mode, mt_lines),
             *_order_tests(test_data, cg, "M", mt_mode, False, mt_lines),
             *_unchecked_access_tests(test_data, cg, "M", mt_mode, mt_lines, m_mode=True),
+            *_checked_regular_tests(test_data, cg, "M", mt_mode, False, mt_lines, m_mode=True),
             *_checktag_sp_tests(test_data, cg, "M", mt_mode, False, mt_lines),
         ]
         test_data.int_regs.return_register(mt)
         iteration += gated(_m_checked_mprv_tests(test_data, cg, mt_mode), SM_MPRV_GATE)
+        iteration += gated(_m_checked_mprv_regular_tests(test_data, cg, mt_mode), SM_MPRV_GATE)
         iteration += gated(_m_checked_mprv_v_tests(test_data, cg, mt_mode), SM_MPRV_V_GATE)
         tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
     val, tmp = test_data.int_regs.get_registers(2)
@@ -4789,6 +5400,7 @@ def make_zimt_s_checktag(test_data: TestData) -> list[TestChunk]:
             *_sp_base_tests(test_data, cg, "S", mt_mode),
             *_order_tests(test_data, cg, "S", mt_mode, False),
             *_unchecked_access_tests(test_data, cg, "S", mt_mode),
+            *_checked_regular_tests(test_data, cg, "S", mt_mode, False),
             *_checktag_sp_tests(test_data, cg, "S", mt_mode, False),
             *gated(_s_mtag_i_tests(test_data, "Zimt_Sm_cg", mt_mode), STANDARD_SM_GATE),
         ]

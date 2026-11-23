@@ -324,46 +324,144 @@
         bins c_sdsp = {3'd4};
     }
     // The accesses that implicit tag checks do not cover (zimt_unchecked_access), whose pointer tags do not match: no
-    // exception. LR/SC and AMOs, and in M-mode also CMOs, HLV/HSV (whose VU-mode memory tagging, senvcfg.MT_MODE, is
-    // disabled there; M-mode's does not apply to them) and vector loads and stores
+    // exception. Prefetches, and in M-mode also cbo.clean, cbo.flush and HLV/HSV (whose VU-mode memory tagging,
+    // senvcfg.MT_MODE, is disabled there; M-mode's does not apply to them)
     unchecked_access: coverpoint zimt_unchecked_access(ins) iff (zimt_exception(ins) == 8'h00) {
         type_option.weight = 0;
-`ifdef ZALRSC_SUPPORTED
-        bins lr  = {4'd1};
-        bins sc  = {4'd2};
-`endif
-`ifdef ZAAMO_SUPPORTED
-        bins amo = {4'd3};
+`ifdef ZICBOP_SUPPORTED
+        bins prefetch_r = {3'd1};
+        bins prefetch_w = {3'd2};
 `endif
     }
     unchecked_access_m: coverpoint zimt_unchecked_access(ins) iff (zimt_exception(ins) == 8'h00) {
         type_option.weight = 0;
-`ifdef ZALRSC_SUPPORTED
-        bins lr  = {4'd1};
-        bins sc  = {4'd2};
-`endif
-`ifdef ZAAMO_SUPPORTED
-        bins amo = {4'd3};
+`ifdef ZICBOP_SUPPORTED
+        bins prefetch_r = {3'd1};
+        bins prefetch_w = {3'd2};
 `endif
 `ifdef ZICBOM_SUPPORTED
-        bins cbo_clean = {4'd4};
-        bins cbo_flush = {4'd5};
-`endif
-`ifdef ZICBOZ_SUPPORTED
-        bins cbo_zero  = {4'd6};
+        bins cbo_clean = {3'd3};
+        bins cbo_flush = {3'd4};
 `endif
 `ifdef H_SUPPORTED
-        bins hlv = {4'd7};
-        bins hsv = {4'd8};
+        bins hlv = {3'd5};
+        bins hsv = {3'd6};
+`endif
+    }
+    // The regular accesses that implicit tag checks cover besides loads and stores (zimt_regular_access): LR/SC, AMOs
+    // and cbo.zero
+    checked_regular: coverpoint zimt_regular_access(ins) {
+        type_option.weight = 0;
+`ifdef ZALRSC_SUPPORTED
+        bins lr = {4'd1};
+        bins sc = {4'd2};
+`endif
+`ifdef ZAAMO_SUPPORTED
+        bins amoadd_d  = {4'd3};
+        bins amoswap_w = {4'd4};
+`endif
+`ifdef ZICBOZ_SUPPORTED
+        bins cbo_zero = {4'd5};
+`endif
+    }
+    // ...in M-mode, with memory tagging enabled there and the matching pointer tag: also cbo.zero, and vector loads and
+    // stores (unit-stride, masked, strided, indexed and fault-only-first); no exception
+    checked_regular_m: coverpoint zimt_regular_access(ins) iff (zimt_exception(ins) == 8'h00) {
+        type_option.weight = 0;
+`ifdef ZALRSC_SUPPORTED
+        bins lr = {4'd1};
+        bins sc = {4'd2};
+`endif
+`ifdef ZAAMO_SUPPORTED
+        bins amoadd_d  = {4'd3};
+        bins amoswap_w = {4'd4};
+`endif
+`ifdef ZICBOZ_SUPPORTED
+        bins cbo_zero = {4'd5};
 `endif
 `ifdef V_SUPPORTED
-        bins vse        = {4'd9};
-        bins vse_masked = {4'd10};
-        bins vsse       = {4'd11};
-        bins vsuxei     = {4'd12};
-        bins vle        = {4'd13};
-        bins vlse       = {4'd14};
-        bins vluxei     = {4'd15};
+        bins vle        = {4'd6};
+        bins vle_masked = {4'd7};
+        bins vlse       = {4'd8};
+        bins vluxei     = {4'd9};
+        bins vleff      = {4'd10};
+        bins vse        = {4'd11};
+        bins vse_masked = {4'd12};
+        bins vsse       = {4'd13};
+        bins vsuxei     = {4'd14};
+`endif
+    }
+    // ...in M-mode with mstatus.MPRV = 1 and MPP = S: LR/SC, AMOs, cbo.zero, and vector loads and stores (unit-stride,
+    // masked, strided, indexed and fault-only-first)
+    checked_regular_mprv: coverpoint zimt_regular_access(ins) {
+        type_option.weight = 0;
+`ifdef ZALRSC_SUPPORTED
+        bins lr = {4'd1};
+        bins sc = {4'd2};
+`endif
+`ifdef ZAAMO_SUPPORTED
+        bins amoadd_d  = {4'd3};
+        bins amoswap_w = {4'd4};
+`endif
+`ifdef ZICBOZ_SUPPORTED
+        bins cbo_zero = {4'd5};
+`endif
+`ifdef V_SUPPORTED
+        bins vle        = {4'd6};
+        bins vle_masked = {4'd7};
+        bins vlse       = {4'd8};
+        bins vluxei     = {4'd9};
+        bins vleff      = {4'd10};
+        bins vse        = {4'd11};
+        bins vse_masked = {4'd12};
+        bins vsse       = {4'd13};
+        bins vsuxei     = {4'd14};
+`endif
+    }
+    // Their outcome: none (the tags match, or no tag check), or a software-check exception
+    checked_regular_result: coverpoint zimt_exception(ins) iff (zimt_regular_access(ins) != 4'd0) {
+        type_option.weight = 0;
+        bins none           = {8'h00};
+        bins software_check = {8'h52};
+    }
+    // In M-mode with mstatus.MPRV = 1 and MPP = S
+    regular_mprv_s: coverpoint zimt_mprv_mpp(ins) iff (zimt_regular_access(ins) != 4'd0) {
+        type_option.weight = 0;
+        bins mprv_s = {4'b1001};
+    }
+    // Without address translation in S-mode (satp Bare), with no exception (S-mode tests only matching pointer tags)
+    regular_satp_bare: coverpoint (zimt_atp_mode(ins, CSR_SATP) == 4'd0)
+        iff ((zimt_regular_access(ins) != 4'd0) && (zimt_exception(ins) == 8'h00)) {
+        type_option.weight = 0;
+        bins bare = {1'b1};
+    }
+    // With first-stage paging, LR/SC, an AMO or cbo.zero (the crosses take the access from checked_regular) of a page
+    // of zimt_mtag_page (zimt_regular_page): of a tagged-data page, which is checked (the outcome is
+    // checked_regular_result)...
+    regular_tagged_page: coverpoint zimt_regular_page(ins) {
+        type_option.weight = 0;
+        bins tagged_data = {3'd1};
+    }
+    // ...of a page with PTE.MTAG = 1 and X = 1, through a pointer with a pointer tag: no tag check, no exception
+    regular_unchecked_page: coverpoint zimt_regular_page(ins)
+        iff ((ins.current.rs1_val[63:57] != 7'd0) && (zimt_exception(ins) == 8'h00)) {
+        type_option.weight = 0;
+        bins executable = {3'd4};
+    }
+    // A misaligned LR/SC or AMO (zimt_regular_misaligned) with a mismatching pointer tag: with Bare translation the tag
+    // check comes before its address-misaligned exception (a software-check exception)...
+    regular_misaligned_bare: coverpoint zimt_exception(ins) iff (zimt_regular_misaligned(ins)) {
+        type_option.weight = 0;
+        bins software_check = {8'h52};
+    }
+    // ...with first-stage paging its address-misaligned exception comes first (store/AMO address misaligned), the
+    // access not checked; where misaligned AMOs are supported, it is checked
+    regular_misaligned_paged: coverpoint zimt_exception(ins) iff (zimt_regular_misaligned(ins)) {
+        type_option.weight = 0;
+`ifdef UDB_MISALIGNED_AMO
+        bins software_check = {8'h52};
+`else
+        bins misaligned = {8'h46};
 `endif
     }
     // The instruction right before it: a byte store through sp (to a tag byte) or settag

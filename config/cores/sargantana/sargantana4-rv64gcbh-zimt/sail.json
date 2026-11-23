@@ -319,9 +319,13 @@
       //   "translated_instr.ex.cause = (instr_to_translate.is_amo_store_or_cmo &&
       //    ~is_load_reserved) ? ST_AMO_ADDR_MISALIGNED : LD_ADDR_MISALIGNED;"
       //   load_store_queue.sv#L203-L211.
+      // Misaligned vector elements are accessed byte by byte too (vagu.sv VL_MISALIGNED
+      // and VS_MISALIGNED, before their PMAs are known, so in IO regions as well), so they
+      // do not trap either. V is not claimed: this matters only to a configuration that
+      // adds it.
       "exceptions": {
         "load_store": { "None": null },
-        "vector": { "Some": "AlignmentException" },
+        "vector": { "None": null },
         "amo": { "Some": "AlignmentException" },
         "lrsc": { "Some": "AlignmentException" }
       },
@@ -379,7 +383,7 @@
           "write_idempotent": false,
           "misaligned_exceptions": {
             "load_store": { "Some": "AlignmentException" },
-            "vector": { "Some": "AlignmentException" },
+            "vector": { "None": null },
             "amo": "AlignmentException",
             "lrsc": "AlignmentException"
           },
@@ -422,7 +426,7 @@
           // (memory.misaligned above), so they do not fault here either.
           "misaligned_exceptions": {
             "load_store": { "None": null },
-            "vector": { "Some": "AlignmentException" },
+            "vector": { "None": null },
             "amo": "AlignmentException",
             "lrsc": "AlignmentException"
           },

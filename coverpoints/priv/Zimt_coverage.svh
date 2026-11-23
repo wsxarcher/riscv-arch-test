@@ -4,12 +4,12 @@
 //
 // Zimt memory tagging: the Zimt instructions and the MOP.RR encodings around them, with memory tagging
 // disabled and enabled, in M, S, U, VS and VU modes; settag and checktag with memory tagging enabled, which store
-// and check tags in the tag tables of Svatag and Smvatag; the implicit tag checks of loads and stores, with Bare
-// translation, with first-stage paging (PTE.MTAG: tagged-data pages, user pages, accesses over two pages and
-// tagcheck-exempt code pages, also of VS-mode and through MPRV of U-mode and VU-mode), with mstatus.MPRV and MTAG_I,
-// with hstatus.MTAG_I, and of HLV and HSV (hstatus.MTAG_I, two-stage translation, GVA); the MT_MODE fields, the
-// MTAG_I bits and the tag generation exclusion mask CSRs; and the software-check exception (cause 18) in the
-// delegation and cause CSRs.
+// and check tags in the tag tables of Svatag and Smvatag; the implicit tag checks of loads and stores (and of LR/SC,
+// AMOs, cbo.zero and vector loads and stores), with Bare translation, with first-stage paging (PTE.MTAG: tagged-data
+// pages, user pages, accesses over two pages and tagcheck-exempt code pages, also of VS-mode and through MPRV of
+// U-mode and VU-mode), with mstatus.MPRV and MTAG_I, with hstatus.MTAG_I, and of HLV and HSV (hstatus.MTAG_I,
+// two-stage translation, GVA); the MT_MODE fields, the MTAG_I bits and the tag generation exclusion mask CSRs; and
+// the software-check exception (cause 18) in the delegation and cause CSRs.
 //
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -162,45 +162,70 @@ function automatic logic [2:0] zimt_sp_compressed(ins_t ins);
     return 3'd0;
 endfunction
 
-// The accesses that implicit tag checks do not cover (cp_unchecked_access): 1 lr.d, 2 sc.d, 3 amoadd.d, 4 cbo.clean,
-// 5 cbo.flush, 6 cbo.zero, 7 hlv.d, 8 hsv.d, 9 vse64.v, 10 masked vse64.v, 11 vsse64.v, 12 vsuxei64.v, 13 vle64.v,
-// 14 vlse64.v, 15 vluxei64.v; 0 for any other instruction
-function automatic logic [3:0] zimt_unchecked_access(ins_t ins);
+// The accesses that implicit tag checks do not cover (cp_unchecked_access): 1 prefetch.r, 2 prefetch.w, 3 cbo.clean,
+// 4 cbo.flush, 5 hlv.d, 6 hsv.d; 0 for any other instruction
+function automatic logic [2:0] zimt_unchecked_access(ins_t ins);
     logic [31:0] insn = ins.current.insn;
-    if (insn ==? LR_D)       return 4'd1;
-    if (insn ==? SC_D)       return 4'd2;
-    if (insn ==? AMOADD_D)   return 4'd3;
-    if (insn ==? CBO_CLEAN)  return 4'd4;
-    if (insn ==? CBO_FLUSH)  return 4'd5;
-    if (insn ==? CBO_ZERO)   return 4'd6;
-    if (insn ==? HLV_D)      return 4'd7;
-    if (insn ==? HSV_D)      return 4'd8;
-    if (insn ==? VSE64_V)    return insn[25] ? 4'd9 : 4'd10;
-    if (insn ==? VSSE64_V)   return 4'd11;
-    if (insn ==? VSUXEI64_V) return 4'd12;
-    if (insn ==? VLE64_V)    return 4'd13;
-    if (insn ==? VLSE64_V)   return 4'd14;
-    if (insn ==? VLUXEI64_V) return 4'd15;
-    return 4'd0;
+    if (insn ==? PREFETCH_R) return 3'd1;
+    if (insn ==? PREFETCH_W) return 3'd2;
+    if (insn ==? CBO_CLEAN)  return 3'd3;
+    if (insn ==? CBO_FLUSH)  return 3'd4;
+    if (insn ==? HLV_D)      return 3'd5;
+    if (insn ==? HSV_D)      return 3'd6;
+    return 3'd0;
 endfunction
 
-// The tests of the accesses that implicit tag checks do not cover need at least one of their extensions: LR/SC or AMOs
-// in all modes, and also CMOs, H or V in M-mode
-`ifdef ZAAMO_SUPPORTED
-    `define ZIMT_UNCHECKED_ACCESS
-`elsif ZALRSC_SUPPORTED
+// The tests of the accesses that implicit tag checks do not cover need at least one of their extensions: prefetches
+// (Zicbop) in all modes, and also cbo.clean and cbo.flush (Zicbom) or H in M-mode
+`ifdef ZICBOP_SUPPORTED
     `define ZIMT_UNCHECKED_ACCESS
 `endif
 `ifdef ZIMT_UNCHECKED_ACCESS
     `define ZIMT_UNCHECKED_ACCESS_M
 `elsif ZICBOM_SUPPORTED
     `define ZIMT_UNCHECKED_ACCESS_M
-`elsif ZICBOZ_SUPPORTED
-    `define ZIMT_UNCHECKED_ACCESS_M
 `elsif H_SUPPORTED
     `define ZIMT_UNCHECKED_ACCESS_M
+`endif
+
+// The regular accesses that implicit tag checks cover besides the loads and stores of zimt_checked_access
+// (cp_checked_regular): 1 lr.d, 2 sc.d, 3 amoadd.d, 4 amoswap.w, 5 cbo.zero, 6 vle64.v, 7 masked vle64.v, 8 vlse64.v,
+// 9 vluxei64.v, 10 vle64ff.v, 11 vse64.v, 12 masked vse64.v, 13 vsse64.v, 14 vsuxei64.v; 0 for any other instruction
+// (also for the segment loads and stores that share the vector encodings, with nf != 0)
+function automatic logic [3:0] zimt_regular_access(ins_t ins);
+    logic [31:0] insn = ins.current.insn;
+    if (insn ==? LR_D)       return 4'd1;
+    if (insn ==? SC_D)       return 4'd2;
+    if (insn ==? AMOADD_D)   return 4'd3;
+    if (insn ==? AMOSWAP_W)  return 4'd4;
+    if (insn ==? CBO_ZERO)   return 4'd5;
+    if (insn[31:29] != 3'd0) return 4'd0;
+    if (insn ==? VLE64_V)    return insn[25] ? 4'd6 : 4'd7;
+    if (insn ==? VLSE64_V)   return 4'd8;
+    if (insn ==? VLUXEI64_V) return 4'd9;
+    if (insn ==? VLE64FF_V)  return 4'd10;
+    if (insn ==? VSE64_V)    return insn[25] ? 4'd11 : 4'd12;
+    if (insn ==? VSSE64_V)   return 4'd13;
+    if (insn ==? VSUXEI64_V) return 4'd14;
+    return 4'd0;
+endfunction
+
+// The tests of the regular accesses besides loads and stores need at least one of their extensions: LR/SC, AMOs or
+// cbo.zero (Zicboz) in all modes, and also V in M-mode; the misaligned ones LR/SC or AMOs
+`ifdef ZAAMO_SUPPORTED
+    `define ZIMT_CHECKED_AMO_LRSC
+`elsif ZALRSC_SUPPORTED
+    `define ZIMT_CHECKED_AMO_LRSC
+`endif
+`ifdef ZIMT_CHECKED_AMO_LRSC
+    `define ZIMT_CHECKED_REGULAR
+`elsif ZICBOZ_SUPPORTED
+    `define ZIMT_CHECKED_REGULAR
+`endif
+`ifdef ZIMT_CHECKED_REGULAR
+    `define ZIMT_CHECKED_REGULAR_M
 `elsif V_SUPPORTED
-    `define ZIMT_UNCHECKED_ACCESS_M
+    `define ZIMT_CHECKED_REGULAR_M
 `endif
 
 // MT_MODE of S-mode (menvcfg, bits 3:2) and of M-mode (mseccfg, bits 1:0) before the instruction
@@ -350,6 +375,21 @@ function automatic logic [2:0] zimt_mtag_single(ins_t ins);
     logic [63:0] last = zimt_last_byte(ins);
     if ((zimt_checked_access(ins) >= 5'd20) || (zimt_atp_mode(ins, CSR_SATP) == 4'd0)) return 3'd0;
     if ((ins.current.virt_adr_d[38:12] != last[38:12]) || (zimt_code_page(ins) != 3'd0)) return 3'd0;
+    return zimt_mtag_page(ins.current.virt_adr_d);
+endfunction
+
+// LR/SC or an AMO (zimt_regular_access 1 to 4) at an address that is not aligned to its width
+function automatic logic zimt_regular_misaligned(ins_t ins);
+    logic [3:0] access = zimt_regular_access(ins);
+    if (access inside {[4'd1:4'd3]}) return ins.current.virt_adr_d[2:0] != 3'd0;
+    if (access == 4'd4)              return ins.current.virt_adr_d[1:0] != 2'd0;
+    return 1'b0;
+endfunction
+
+// LR/SC, an AMO or cbo.zero (zimt_regular_access 1 to 5) with first-stage paging (satp not Bare): the page of
+// zimt_mtag_page of its address; 0 otherwise
+function automatic logic [2:0] zimt_regular_page(ins_t ins);
+    if (!(zimt_regular_access(ins) inside {[4'd1:4'd5]}) || (zimt_atp_mode(ins, CSR_SATP) == 4'd0)) return 3'd0;
     return zimt_mtag_page(ins.current.virt_adr_d);
 endfunction
 
@@ -621,12 +661,21 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
 `ifdef ZIMT_UNCHECKED_ACCESS_M
     cp_unchecked_access:           cross priv_mode_m, mt_enabled, unchecked_access_m;
 `endif
+`ifdef ZIMT_CHECKED_REGULAR_M
+    cp_checked_regular:            cross priv_mode_m, mt_enabled, checked_regular_m;
+`endif
     cp_checktag_sp:                cross priv_mode_m, mt_enabled, checktag_sp;
     // MPRV with MPP = S: loads and stores are checked with S-mode's MT_MODE and tag table, checktag with M-mode's
 `ifdef S_SUPPORTED
 `ifdef SMNPM_SUPPORTED
 `ifdef SVATAG_SUPPORTED
     cp_checked_mprv:               cross priv_mode_m, checked_mprv_s, mprv_s_mt, checked_load_store, checked_result;
+`ifdef ZIMT_CHECKED_REGULAR_M
+    cp_checked_regular_mprv:       cross priv_mode_m, regular_mprv_s, mprv_s_mt, checked_regular_mprv, checked_regular_result;
+`endif
+`ifdef ZIMT_CHECKED_AMO_LRSC
+    cp_checked_regular_misaligned: cross priv_mode_m, regular_mprv_s, mprv_s_mt, regular_misaligned_bare;
+`endif
     cp_checked_mprv_m_mt:          cross priv_mode_m, checked_mprv_s, mprv_m_mt, checked_load_store;
     cp_checked_mprv_mtag_i:        cross priv_mode_m, mprv_mtag_i_s, mprv_s_mt, checked_load_store;
     cp_checktag_mprv:              cross priv_mode_m, checktag_mprv_s, mprv_mt;
@@ -746,6 +795,13 @@ covergroup Zimt_S_cg with function sample(ins_t ins);
     // from tagcheck-exempt code pages; PTE.MTAG reserved in non-leaf PTEs, ignored with memory tagging disabled
     cp_checked_tagged_page: cross priv_mode_s, mt_enabled, checked_load_store, mtag_tagged_page, checked_result;
     cp_unchecked_page:      cross priv_mode_s, mt_enabled, checked_load_store, mtag_unchecked_page;
+`ifdef ZIMT_CHECKED_REGULAR
+    cp_checked_regular_tagged_page: cross priv_mode_s, mt_enabled, regular_tagged_page, checked_regular, checked_regular_result;
+    cp_unchecked_regular_page: cross priv_mode_s, mt_enabled, regular_unchecked_page, checked_regular;
+`endif
+`ifdef ZAAMO_SUPPORTED
+    cp_checked_regular_misaligned: cross priv_mode_s, mt_enabled, regular_tagged_page, regular_misaligned_paged;
+`endif
     cp_mtag_mt_disabled:    cross priv_mode_s, mt_disabled, checked_load_store, mtag_ignored;
     cp_mtag_nonleaf:        cross priv_mode_s, mtag_nonleaf_fault;
     // Over two pages, with misaligned loads and stores performed byte by byte, so also over two pages
@@ -774,6 +830,9 @@ covergroup Zimt_S_cg with function sample(ins_t ins);
     cp_checked_order:       cross priv_mode_s, mt_enabled, checked_satp_bare, checked_load_store, checked_order;
 `ifdef ZIMT_UNCHECKED_ACCESS
     cp_unchecked_access:    cross priv_mode_s, mt_enabled, unchecked_access;
+`endif
+`ifdef ZIMT_CHECKED_REGULAR
+    cp_checked_regular:     cross priv_mode_s, mt_enabled, regular_satp_bare, checked_regular;
 `endif
     cp_checktag_sp:         cross priv_mode_s, mt_enabled, checktag_sp;
 `endif
@@ -823,6 +882,9 @@ covergroup Zimt_U_cg with function sample(ins_t ins);
 `endif
 `ifdef ZIMT_UNCHECKED_ACCESS
     cp_unchecked_access:    cross priv_mode_u, mt_enabled, unchecked_access;
+`endif
+`ifdef ZIMT_CHECKED_REGULAR
+    cp_checked_regular:     cross priv_mode_u, mt_enabled, checked_regular, checked_regular_result;
 `endif
     cp_checktag_sp:         cross priv_mode_u, mt_enabled, checktag_sp, checktag_result;
 `ifdef RVMODEL_ACCESS_FAULT_ADDRESS_LOAD
@@ -912,6 +974,9 @@ covergroup Zimt_H_cg with function sample(ins_t ins);
 `endif
 `ifdef ZIMT_UNCHECKED_ACCESS
     cp_unchecked_access:    cross priv_mode_vs_vu, mt_enabled, unchecked_access;
+`endif
+`ifdef ZIMT_CHECKED_REGULAR
+    cp_checked_regular:     cross priv_mode_vs_vu, mt_enabled, checked_regular, checked_regular_result;
 `endif
     cp_checktag_sp:         cross priv_mode_vs_vu, mt_enabled, checktag_sp, checktag_result;
     cp_swcheck_to_vs:       cross priv_mode_vu, mt_enabled, swcheck_to_vs;
