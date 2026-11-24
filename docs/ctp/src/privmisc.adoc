@@ -149,6 +149,7 @@ Misaligned loads and stores over two chunks are tested in those modes only with 
 The access-fault cases need `RVMODEL_ACCESS_FAULT_ADDRESS_STORE` and `RVMODEL_ACCESS_FAULT_ADDRESS_LOAD`, and exist only if the DUT defines them.
 The specification does not allocate the CSR addresses and the PTE.MTAG bit yet: the tests use the placeholders of the Sail model (PTE.MTAG is bit 58).
 4-bit pointer tags are mandatory and 7-bit ones optional: a configuration that supports them sets `ZIMT_POINTER_TAG_WIDTH_7` under `experimental_params`, and the cases and bins that need them exist only then.
+The VITT ranges of M-mode (Smvatag) and of a mode with Bare first-stage address translation (Svatag), whose loads, stores and `settag` raise access faults, are implementation-defined: the tests whose loads, stores or `settag` run with memory tagging enabled there take them as empty, and exist only without the extension or for a configuration that sets `SMVATAG_NO_M_MODE_VITT_RANGE` or `SVATAG_NO_BARE_VITT_RANGE` under `experimental_params`, as do the bins that only they cover: the `_mt` tests and the `settag` and `checktag` tests of M-mode and of Bare translation, also through `mstatus.MPRV` and with the G stage only.
 
 include::{testplansdir}/priv/Zimt.adoc[]
 
@@ -159,8 +160,7 @@ include::norm/Zimt_norm_rules.adoc[]
 Svatag is not ratified, and UDB does not define it yet, so its tests are built only for a configuration whose `test_config.yaml` lists Svatag under `experimental_extensions`, which also enables experimental extensions as `ENABLE_EXPERIMENTAL_EXTENSIONS` does.
 It defines the tag table base CSRs of S, U, VS and VU modes, for the Zimt tag accesses.
 The tests cover the CSRs' WARL behavior and their access from each mode, including the VS-mode access to `svitts` and `svittu`, which reaches `vsvitts` and `vsvittu`.
-The Zimt `settag` and `checktag` tests check which tag table each mode uses.
-The tag table protection is not tested yet.
+The Zimt `settag` and `checktag` tests check which tag table each mode uses, and the tag table protection with first-stage address translation, at the edges of the VITT ranges: the loads and stores and `settag` of S-mode, U-mode, VS-mode and VU-mode (U-mode and VU-mode from a user alias of the code region), those of U-mode, VS-mode and VU-mode through `mstatus.MPRV`, and HLV and HSV, also in HU-mode, with pointer tags, whose tag check comes first, and with memory tagging disabled, or HLVX, which it does not protect (Zimt_S_checktag, Zimt_H_checktag).
 
 include::{testplansdir}/priv/Svatag.adoc[]
 

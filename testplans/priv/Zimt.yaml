@@ -15,6 +15,7 @@ notes: |
   With 8-bit memory tags (7-bit pointer tags) the tag of chunk c is the byte at xVITT + c; with 4-bit tags it is the lower (c even) or upper (c odd) half of the byte at xVITT + c / 2, so settag reads, modifies and writes the bytes it shares with other chunks. Before each settag, a pattern whose bytes and halves differ from the tag surrounds the tags.
   settag never raises a misaligned exception in these tests, as in the Sail model. The specification says both that tag accesses "must not raise misaligned exception" (mte_tag.adoc, introduction) and that "If implementation doesn't support misaligned accesses, settag instruction can raise misaligned exception" (settag exceptions). Whether a settag that faults stores the tags before the fault is implementation-defined, since settag may split its tag store into parts with no ordering among them: those tags hold the settag tag already.
   The implicit tag check tests use a data page whose chunks have their tags in the tag table, through the tag table base of the mode. A misaligned load or store, which a hart may perform in parts, checks the tags of all the chunks it overlaps before any part of it.
+  With memory tagging enabled and first-stage address translation in the effective privilege mode, Svatag protects the tag storage of that mode: a regular access (a load or store of data, LR/SC, AMO, cbo.zero or vector one, checked or not) whose bytes span its VITT range, the virtual addresses mc_tag_va gives the tags of the virtual addresses of the mode, raises the access fault of its kind, after its page faults and its tag check, and so does a settag (store/AMO access fault) whose chunks overlap it. The VITT range of S-mode and VS-mode holds the tags of the upper half of the address space: with Sv39 it starts at xVITT + ((2^64 - 2^38) >> 5) with 4-bit tags and xVITT + ((2^64 - 2^38) >> 4) with 7-bit ones, modulo 2^64; that of U-mode and VU-mode, the lower half, at xVITT. With Sv39 both are 2^33 bytes with 4-bit tags and 2^34 with 7-bit ones. Those of M-mode and of Bare translation are implementation-defined: the tests whose loads, stores or settags run with memory tagging enabled there take them as empty, so they and the bins that only they cover exist only without Smvatag (M-mode) or Svatag (Bare translation), or if the configuration sets SMVATAG_NO_M_MODE_VITT_RANGE or SVATAG_NO_BARE_VITT_RANGE in the experimental_params of test_config.yaml (UDB_SMVATAG_NO_M_MODE_VITT_RANGE, UDB_SVATAG_NO_BARE_VITT_RANGE): the _mt tests, and the settag and checktag tests of M-mode and of Bare translation, also through MPRV and with the G stage only. The tests put the tag table bases so that these ranges hold no memory that their modes access, through page-table aliases where needed, except in cp_vitt, cp_vitt_mprv_u, cp_vitt_mprv_v, cp_vitt_mtag_i and cp_vitt_hlsv.
   A swept register that the framework uses is saved and restored around the instruction.
 coverpoints:
   - heading: Zimt instructions with memory tagging disabled (every group)
@@ -240,7 +241,7 @@ coverpoints:
     goal: settag uses the masked address of rs1, sign-extended with address translation and zero-extended without
     description: |-
       M-mode (Zimt_Sm_settag), without translation: settag of 16 chunks through a pointer with bit 56 (PMLEN 7) or bit 47 (PMLEN 16) set, which pointer masking zero-extends, and mvitt = the tag table minus the tag offset of that bit, so the tags land in the tag table.
-      S-mode (Zimt_S_settag), with Sv39: the settag of the valid crossing case through a pointer with bits 56 and 47 set, which pointer masking sign-extends, and svitts wrapped around by the tag offset of the sign-extended bits. Record the tags as for the other cases.
+      S-mode (Zimt_S_settag), with Sv39: the settag of the valid crossing case through a pointer with bits 56 and 47 set, the lowest Sv39 address of the upper half, which pointer masking sign-extends, and svitts wrapped around by the tag offset of the sign-extended bits, so the S-mode tag storage range starts at the tag table, above the test image. Record the tags as for the other cases.
       Each with 4-bit and 7-bit tags.
     expectation: The same tags as through a pointer without those bits. A hart that extends the other way stores its tags far from the tag table, where they fault.
     bins: M, S x 2 widths; 1 width without 7-bit tags
@@ -484,7 +485,7 @@ coverpoints:
       cp_checked_mprv_vu_page
     goal: With first-stage paging, the loads of U-mode and VU-mode are tag checked in user tagged-data pages, which only supervisor accesses do not check, and not in pages without PTE.MTAG
     description: |-
-      In M-mode with mstatus.MPRV = 1 and MPP = U, senvcfg.MT_MODE, senvcfg.PMM and svittu set and Sv39 translation (Zimt_S_checktag, with standard M-mode: STANDARD_SM_SUPPORTED; needs U and Ssnpm): a load of a user tagged-data page with a mismatching pointer tag and with the matching one, and of a user page without PTE.MTAG with a mismatching one. The same with MPV = 1, vsvittu and two-stage translation, of VS-stage user pages (Zimt_H_checktag, with standard M-mode; needs Sv39). Record rd. Each with 4-bit and 7-bit tags.
+      In M-mode with mstatus.MPRV = 1 and MPP = U, senvcfg.MT_MODE, senvcfg.PMM and svittu set and Sv39 translation (Zimt_S_checktag, with standard M-mode: STANDARD_SM_SUPPORTED; needs U and Ssnpm): a load of a user tagged-data page with a mismatching pointer tag and with the matching one, and of a user page without PTE.MTAG with a mismatching one. The same with MPV = 1, vsvittu and two-stage translation, of VS-stage user pages (Zimt_H_checktag, with standard M-mode; needs Sv39). Record rd. svittu and vsvittu put the tags in an alias of the tag page above the data pages, so that the VITT range of U-mode and VU-mode, which starts there, does not hold them. Each with 4-bit and 7-bit tags.
     expectation: The load of the user tagged-data page with a mismatching tag raises a software-check exception (cause 18, mtval = 4, GVA = 0), which M-mode takes, rd unchanged; the others are performed.
     bins: 2 widths x 3 (cp_checked_mprv_u_page); 2 widths x 3 (cp_checked_mprv_vu_page); 1 width without 7-bit tags
   - name: cp_unchecked_access
@@ -515,3 +516,73 @@ coverpoints:
     description: In VU-mode with Bare translation and memory tagging enabled (Zimt_H_checktag), with hedeleg[18] = 1 and VS-mode's memory tagging disabled, checktag and a load through a pointer with a mismatching tag. Each with 4-bit and 7-bit tags.
     expectation: Software-check exceptions that VS-mode takes (vscause = 18, vstval = 4).
     bins: 2 widths x (checktag, load); 1 width without 7-bit tags
+  - heading: Protection of tag storage (Svatag)
+  - name: cp_vitt
+    goal: With first-stage paging, the regular accesses in the VITT range of the mode raise access faults, after their page faults and tag check, and so does a settag whose chunks overlap it
+    description: |-
+      In S-mode (Zimt_S_checktag) with Sv39, menvcfg.MT_MODE and PMM set, and svitts putting the VITT range of S-mode at the tags page of the MTAG pages: the executable page (PTE.MTAG and X = 1, so not checked) before it is outside the range; 2^33 (4-bit tags) or 2^34 (7-bit tags) bytes up, an alias of the executable page is its last page and an alias of the tags page the page after it. A load and a store in its first page; a load through sp there (sp, saved around it, holds the pointer); loads in the page before, in the last page and in the page after; a load in the tagged-data page after the first one, whose tag address is not canonical; a load in the unmapped page after that; (hardware misaligned loads and stores split byte by byte) misaligned loads from the page before into the first page and from the last page into the page after, and a store from the page before into the first page; (Zalrsc) lr.d in the first page, lr.d of the same address through the page after, which reserves it, then sc.d in the first page; (Zaamo) amoadd.d there; (Zicboz) cbo.zero there; settag of a chunk in the first page; settag of 2 chunks, the last one of the page before and the first one of the range, and of 2 chunks, the last one of the range and the first one of the page after; settag of the last chunk of the page before alone. The load, the store, cbo.zero and the first settag use a pointer with a pointer tag, which pointer masking ignores. Record rd, which holds a canary before, and, through the page after the range, the memory that the faulting sd, sc.d, amoadd.d and cbo.zero would write (the cache block of cbo.zero holds a nonzero pattern before). Each with 4-bit and 7-bit tags.
+    expectation: The accesses in the range raise a load access fault (cause 5; ld, also through sp, and lr.d) or a store/AMO access fault (cause 7; sd, sc.d, amoadd.d, cbo.zero, settag), stval = the access address, pointer-masked (for the load into the first page, that of its first byte in the range, the first byte of the page; for cbo.zero and settag, the masked rs1 address, also when only a later chunk overlaps the range), rd and memory unchanged; sc.d raises it with a reservation, so it may not fail instead ("a failed SC may be treated like a store"). The loads before and after the range, and the lr.d through the page after it, are performed. The load in the tagged-data page raises the load page fault of its tag load (stval = the tag address), the one in the unmapped page its load page fault (cause 13, stval = its address). The settag of the last chunk before the range alone raises the store/AMO page fault of its tag store (cause 15, stval = its non-canonical tag address). The store into the first page raises the store/AMO access fault at the first byte of the range, after storing its bytes in the page before.
+    bins: 2 widths x up to 20 cases (fewer without the extensions or hardware misaligned loads; 1 width without 7-bit tags)
+  - name: cp_vitt_settag_16
+    goal: settag is protected if any of its chunks overlaps the VITT range, also its last one only
+    description: In S-mode (Zimt_S_checktag) with the VITT range of cp_vitt, settag of 16 chunks (imm4 = 15) from the page before the range, of which only the last one is in its first page. Each with 4-bit and 7-bit tags.
+    expectation: A store/AMO access fault (cause 7), stval = the masked rs1 address, and no tag store.
+    bins: 2 widths; 1 width without 7-bit tags
+  - name: cp_vitt_mt_disabled
+    goal: Without memory tagging, there is no VITT range
+    description: In S-mode (Zimt_S_checktag) with Sv39 and svitts of cp_vitt, but menvcfg.MT_MODE = 00, a load in the first page of the range that 4-bit tags would give. Record rd.
+    expectation: The load is performed.
+    bins: 1
+  - name: cp_vitt_u
+    goal: U-mode's own regular accesses and settag are protected with its VITT range
+    description: In U-mode (Zimt_S_checktag; needs U and Ssnpm) with Sv39, running from a user alias of the code region (a gigapage below the range, registered for the T-SBI mode switches meanwhile), senvcfg.MT_MODE and PMM set and svittu putting the VITT range of U-mode at the user tags page of the MTAG pages, a settag and a load in its first page, through a pointer with a pointer tag. Record rd in S-mode. Each with 4-bit and 7-bit tags.
+    expectation: A store/AMO access fault (cause 7) and a load access fault (cause 5), stval = the masked address, rd unchanged.
+    bins: 2 widths x (ld, settag); 1 width without 7-bit tags
+  - name: cp_vitt_v
+    goal: The own regular accesses and settag of VS-mode and VU-mode are protected with their VITT ranges
+    description: In VS-mode with two-stage translation (Zimt_H_checktag; needs Sv39), henvcfg.MT_MODE set and vsvitts putting the VITT range of VS-mode at the guest page without PTE.MTAG, a load and a settag in its first page; in VU-mode, from the guest code alias as a user page, senvcfg.MT_MODE set and vsvittu putting the VITT range of VU-mode at the VS-stage user page without PTE.MTAG, a settag and a load in its first page. Through a pointer with a pointer tag. Record rd (in HS-mode for VU-mode). Each with 4-bit and 7-bit tags.
+    expectation: A load access fault (cause 5) and a store/AMO access fault (cause 7), which HS-mode takes, stval = the masked address, hstatus.GVA = 1, rd unchanged.
+    bins: 2 widths x (VS, VU) x (ld, settag); 1 width without 7-bit tags
+  - name: cp_vitt_hlvx
+    goal: HLVX is not a regular access, so the VITT range does not protect it
+    description: In HS-mode with two-stage translation (Zimt_H_checktag; needs Sv39) and hstatus.SPVP = 1, with vsvitts putting the VITT range of VS-mode at the VS-stage code page without PTE.MTAG, hlvx.wu there. Record rd. Each with 4-bit and 7-bit tags.
+    expectation: hlvx.wu is performed, so rd = the instruction word.
+    bins: 2 widths; 1 width without 7-bit tags
+  - name: |-
+      cp_vitt_gva
+      cp_vitt_u_gva
+      cp_vitt_mprv_u_gva
+      cp_vitt_mprv_v_gva
+      cp_vitt_hlsv_gva
+      cp_vitt_hlsv_hu_gva
+      cp_vitt_v_gva
+    goal: The access faults of the protection of tag storage write GVA as other access faults do
+    description: With H, the access faults of cp_vitt (S-mode), cp_vitt_u (U-mode), cp_vitt_mprv_u (MPRV with MPP = U), cp_vitt_mprv_v (MPRV with MPV = 1), cp_vitt_hlsv (HLV and HSV), cp_vitt_hlsv_hu (HU-mode) and cp_vitt_v (VS-mode and VU-mode).
+    expectation: GVA (hstatus.GVA for a trap to HS-mode, mstatus.GVA for one to M-mode) is 1 at effective V = 1 (MPRV with MPV = 1, HLV and HSV, VS-mode and VU-mode), and 0 otherwise.
+    bins: GVA = 0 in S-mode and U-mode (2 widths each) and with MPRV and MPP = U; GVA = 1 with MPRV and MPV = 1 (VS, VU), for HLV and HSV (SPVP = 0 and 1), in HU-mode and in VS-mode and VU-mode; 1 width without 7-bit tags
+  - name: |-
+      cp_vitt_mprv_u
+      cp_vitt_mprv_v
+    goal: The VITT range is that of the effective privilege mode, with MPRV
+    description: |-
+      In M-mode with mstatus.MPRV = 1 and MPP = U, senvcfg.MT_MODE and PMM set, and Sv39 translation, with svittu putting the VITT range of U-mode at the user tags page (Zimt_S_checktag, with standard M-mode; needs U and Ssnpm): loads in its first page, in the user page without PTE.MTAG before it, in its last page (an alias of that page 2^33 or 2^34 bytes up) and in the page after it, and (hardware misaligned loads split byte by byte) from the page before into the first page and from the last page into the page after; (V) vle64.v and vse64.v of two 64-bit elements in its first page; then with svittu putting the range over the MTAG pages and the tags of their chunks in the user tags page, loads of the user tagged-data page in it with the matching pointer tag and with a mismatching one (cp_vitt_mprv_u). With MPV = 1 and two-stage translation (Zimt_H_checktag, with standard M-mode; needs Sv39), with MPP = S (henvcfg.MT_MODE) and vsvitts putting the VITT range of VS-mode at the guest page without PTE.MTAG after VS_MTAG_VA, and with MPP = U (senvcfg.MT_MODE) and vsvittu putting that of VU-mode at the VS-stage user page without PTE.MTAG: a load in the first page of the range, and one in the tagged-data page before it with mstatus.MTAG_I = 1, so not checked (cp_vitt_mprv_v). The first load of the U-mode range, vle64.v and the loads in the VS-mode and VU-mode ranges use a pointer with a pointer tag, which pointer masking ignores. Record rd, which holds a canary before, vd of vle64.v, which holds a pattern before, and the memory of vse64.v. Each with 4-bit and 7-bit tags.
+    expectation: The loads in the range raise a load access fault (cause 5, mtval = the access address, for the load into the first page the first byte of that page; GVA = 0, and GVA = 1 with MPV = 1), which M-mode takes, rd unchanged; vle64.v a load access fault and vse64.v a store/AMO access fault (cause 7) at element 0 (mtval = the masked rs1), vd and memory unchanged; the others are performed. In the user tagged-data page, the tag check comes first; with the matching pointer tag it passes and the load raises the load access fault, with a mismatching one a software-check exception (cause 18, mtval 4).
+    bins: 2 widths x up to 10 cases (cp_vitt_mprv_u); 2 widths x (VS, VU) x 2 cases (cp_vitt_mprv_v); 1 width without 7-bit tags
+  - name: cp_vitt_mtag_i
+    goal: mstatus.MTAG_I disables the tag checks of the accesses with MPRV, not the protection of tag storage
+    description: |-
+      In M-mode with mstatus.MPRV = 1, MPP = U and mstatus.MTAG_I = 1, a load in the first page of the VITT range of U-mode of cp_vitt_mprv_u (Zimt_S_checktag, with standard M-mode; needs U and Ssnpm), and one in the user tagged-data page of cp_vitt_mprv_u in the range over the MTAG pages, with a mismatching pointer tag. Record rd. Each with 4-bit and 7-bit tags.
+    expectation: A load access fault (cause 5, mtval = its address), which M-mode takes, rd unchanged; the tagged-data page is not tag checked.
+    bins: 2 widths x 2 cases; 1 width without 7-bit tags
+  - name: cp_vitt_hlsv
+    goal: HLV and HSV are protected with the VITT range of their guest mode, whatever hstatus.MTAG_I
+    description: |-
+      In HS-mode with two-stage translation (Zimt_H_checktag; needs Sv39) and hstatus.MTAG_I = 1, which disables the tag checks of HLV and HSV, through a pointer with a pointer tag, which pointer masking (henvcfg.PMM, senvcfg.PMM) ignores: with hstatus.SPVP = 1 (henvcfg.MT_MODE) and vsvitts putting the VITT range of VS-mode at the guest page without PTE.MTAG, and with SPVP = 0 (senvcfg.MT_MODE) and vsvittu putting that of VU-mode at the VS-stage user tagged-data page, hlv.d and hsv.d in the first page of the range; svitts, the tag table base of HS-mode, is 32 GiB above those pages, so that neither of the ranges it would give holds them. Record rd, and the check data that the accesses map. Each with 4-bit and 7-bit tags.
+    expectation: hlv.d raises a load access fault (cause 5) and hsv.d a store/AMO access fault (cause 7), stval = the masked access address, hstatus.GVA = 1, rd and memory unchanged.
+    bins: 2 widths x (VS, VU) x (hlv.d, hsv.d); 1 width without 7-bit tags
+  - name: cp_vitt_hlsv_hu
+    goal: In HU-mode, HLV and HSV of VU-mode are protected with the VITT range that hstatus.VUMT_MODE gives, not senvcfg.MT_MODE
+    description: |-
+      In HU-mode (hstatus.HU = 1; Zimt_H_checktag, needs Sv39) with two-stage translation and hstatus.SPVP = 0, and vsvittu putting the VITT range of VU-mode at the VS-stage user page without PTE.MTAG, which is not tag checked: hlv.d and hsv.d, through a pointer with a pointer tag, which hstatus.HUPMM masks, in the first page of the range with hstatus.VUMT_MODE set and senvcfg.MT_MODE = 00, then (with no VITT range in U-mode with Bare translation, SVATAG_NO_BARE_VITT_RANGE) with senvcfg.MT_MODE set and VUMT_MODE = 00. Record rd, and in HS-mode the check data that the accesses map. Each with 4-bit and 7-bit tags.
+    expectation: With VUMT_MODE set, hlv.d raises a load access fault (cause 5) and hsv.d a store/AMO access fault (cause 7), stval = the masked access address, hstatus.GVA = 1, rd and memory unchanged; with senvcfg.MT_MODE set instead, both are performed.
+    bins: 2 widths x (hlv.d, hsv.d) with VUMT_MODE set; 1 width without 7-bit tags

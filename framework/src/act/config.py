@@ -21,6 +21,11 @@ from act.toolchain import EXPERIMENTAL_EXTENSIONS, CompilerType, Toolchain
 EXPERIMENTAL_PARAMS: dict[str, str] = {
     # Zimt supports 7-bit pointer tags (MT_MODE = 0b11) besides the mandatory 4-bit ones
     "ZIMT_POINTER_TAG_WIDTH_7": "Zimt",
+    # The VITT range (protected tag storage) of M-mode, which is implementation-defined, is empty
+    "SMVATAG_NO_M_MODE_VITT_RANGE": "Smvatag",
+    # The VITT range of a mode with Bare first-stage address translation (satp, or vsatp at V = 1), which is
+    # implementation-defined, is empty
+    "SVATAG_NO_BARE_VITT_RANGE": "Svatag",
 }
 
 

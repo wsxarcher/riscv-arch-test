@@ -730,6 +730,150 @@
         bins user_match    = {4'b01_01};
         bins user_untagged = {4'b10_01};
     }
+    // Protection of tag storage (Svatag; zimt_vitt: {kind, page, outcome}). In S-mode with the VITT range from the tags
+    // page of MTAG_PAGES: a load and a store in its first page, and LR, SC (reserved by an LR of the same address
+    // through the page after, which is performed), amoadd.d and cbo.zero there, a load in its last page and (with
+    // misaligned loads performed byte by byte) from the page before into its first page and from its last page into
+    // the page after, raise the access fault of their kind; a load in the page before or the page after none; in a
+    // tagged-data page of the range its tag check comes first (a page fault on its tag address), in an unmapped page
+    // its page fault. settag of a chunk in its first page, of chunks from the page before into it, or of chunks from its
+    // last page into the page after raises a store/AMO access fault, and of the last chunk before it alone the page
+    // fault of its tag store. A load through sp in its first page raises a load access fault too.
+    vitt_s: coverpoint zimt_vitt(ins) {
+        type_option.weight = 0;
+        bins ld_first           = {{4'd1, 3'd1, 2'd1}};
+        bins sd_first           = {{4'd2, 3'd1, 2'd1}};
+        bins ld_before          = {{4'd1, 3'd4, 2'd0}};
+        bins ld_last            = {{4'd1, 3'd2, 2'd1}};
+        bins ld_after           = {{4'd1, 3'd5, 2'd0}};
+        bins ld_tag_check       = {{4'd1, 3'd3, 2'd3}};
+        bins ld_unmapped        = {{4'd1, 3'd3, 2'd2}};
+        bins settag_first       = {{4'd7, 3'd1, 2'd1}};
+        bins settag_into_first  = {{4'd7, 3'd6, 2'd1}};
+        bins settag_out_of_last = {{4'd7, 3'd7, 2'd1}};
+        bins settag_before      = {{4'd7, 3'd4, 2'd3}};
+        bins ld_sp_first        = {{4'd12, 3'd1, 2'd1}};
+`ifdef UDB_MISALIGNED_LDST
+`ifdef UDB_MISALIGNED_SPLIT_STRATEGY_SEQUENTIAL_BYTES
+        bins ld_into_first      = {{4'd1, 3'd6, 2'd1}};
+        bins ld_out_of_last     = {{4'd1, 3'd7, 2'd1}};
+        bins sd_into_first      = {{4'd2, 3'd6, 2'd1}};
+`endif
+`endif
+`ifdef ZALRSC_SUPPORTED
+        bins lr_first           = {{4'd3, 3'd1, 2'd1}};
+        bins lr_after           = {{4'd3, 3'd5, 2'd0}};
+        bins sc_first           = {{4'd4, 3'd1, 2'd1}};
+`endif
+`ifdef ZAAMO_SUPPORTED
+        bins amoadd_d_first     = {{4'd5, 3'd1, 2'd1}};
+`endif
+`ifdef ZICBOZ_SUPPORTED
+        bins cbo_zero_first     = {{4'd6, 3'd1, 2'd1}};
+`endif
+    }
+    // ...in M-mode with mstatus.MPRV = 1 and MPP = U, with the VITT range of U-mode from the user tags page: loads in
+    // its first and last pages (and from the page before into the first one and from the last one into the page
+    // after) raise a load access fault; in the page before and the page after none; vle64.v and vse64.v in its first
+    // page a load and a store/AMO access fault at element 0. With the range over the MTAG pages, a load of the user
+    // tagged-data page in it: with the matching pointer tag the access fault, with a mismatching one the
+    // software-check exception of its tag check
+    vitt_mprv_u: coverpoint zimt_vitt(ins) {
+        type_option.weight = 0;
+        bins ld_first       = {{4'd1, 3'd1, 2'd1}};
+        bins ld_before      = {{4'd1, 3'd4, 2'd0}};
+        bins ld_last        = {{4'd1, 3'd2, 2'd1}};
+        bins ld_after       = {{4'd1, 3'd5, 2'd0}};
+        bins ld_tagged_match    = {{4'd1, 3'd3, 2'd1}};
+        bins ld_tagged_mismatch = {{4'd1, 3'd3, 2'd3}};
+`ifdef UDB_MISALIGNED_LDST
+`ifdef UDB_MISALIGNED_SPLIT_STRATEGY_SEQUENTIAL_BYTES
+        bins ld_into_first  = {{4'd1, 3'd6, 2'd1}};
+        bins ld_out_of_last = {{4'd1, 3'd7, 2'd1}};
+`endif
+`endif
+`ifdef V_SUPPORTED
+        bins vle_first      = {{4'd8, 3'd1, 2'd1}};
+        bins vse_first      = {{4'd9, 3'd1, 2'd1}};
+`endif
+    }
+    // ...and with MPV = 1, in the VITT range of VS-mode (MPP = S) or VU-mode (MPP = U): a load in its first page
+    // raises a load access fault, one in the page before it none
+    vitt_mprv_v: coverpoint zimt_vitt(ins) {
+        type_option.weight = 0;
+        bins ld_first  = {{4'd1, 3'd1, 2'd1}};
+        bins ld_before = {{4'd1, 3'd4, 2'd0}};
+    }
+    // ...and with mstatus.MTAG_I = 1, which only disables the tag checks: a load in the first page of the VITT range of
+    // U-mode still raises a load access fault
+    vitt_mtag_i: coverpoint zimt_vitt(ins) iff (zimt_mstatus_mtag_i(ins)) {
+        type_option.weight = 0;
+        bins ld_first  = {{4'd1, 3'd1, 2'd1}};
+        // ...also in a user tagged-data page in the range, with a mismatching pointer tag
+        bins ld_tagged = {{4'd1, 3'd3, 2'd1}};
+    }
+    // In S-mode, settag of 16 chunks from the page before the VITT range, of which only the last one is in it: a
+    // store/AMO access fault
+    vitt_settag_16: coverpoint zimt_vitt(ins) iff (ins.current.insn[23:20] == 4'hF) {
+        type_option.weight = 0;
+        bins into_first = {{4'd7, 3'd6, 2'd1}};
+    }
+    // In S-mode with memory tagging disabled, a load in the first page of the range that its tag table base would give
+    // with 4-bit tags: performed
+    vitt_mt_disabled: coverpoint zimt_vitt_mt_disabled(ins) {
+        type_option.weight = 0;
+        bins ld_first = {{4'd1, 3'd1, 2'd0}};
+    }
+    // In U-mode with Sv39, and in VS-mode and VU-mode with two-stage translation, a load and a settag in the first page
+    // of the VITT range of the mode: a load and a store/AMO access fault
+    vitt_direct: coverpoint zimt_vitt(ins) {
+        type_option.weight = 0;
+        bins ld_first     = {{4'd1, 3'd1, 2'd1}};
+        bins settag_first = {{4'd7, 3'd1, 2'd1}};
+    }
+    // In HS-mode, hlvx.wu, which is not a regular access, in the first page of the VITT range of its guest mode:
+    // performed
+    vitt_hlvx: coverpoint zimt_vitt(ins) {
+        type_option.weight = 0;
+        bins hlvx_first = {{4'd13, 3'd1, 2'd0}};
+    }
+    // In HS-mode, hlv.d and hsv.d in the first page of the VITT range of their guest mode (hstatus.SPVP): a load
+    // access fault and a store/AMO access fault
+    vitt_hlsv: coverpoint zimt_vitt(ins) {
+        type_option.weight = 0;
+        bins hlv_first = {{4'd10, 3'd1, 2'd1}};
+        bins hsv_first = {{4'd11, 3'd1, 2'd1}};
+    }
+    // The GVA bit of the access fault of a regular access or settag in the VITT range of its mode, which HS-mode or
+    // M-mode takes (zimt_trap_gva): set at effective V = 1 (VS-mode and VU-mode, also through MPRV with MPV = 1, and
+    // HLV and HSV)...
+    vitt_fault_gva: coverpoint zimt_trap_gva(ins) iff (zimt_vitt(ins)[1:0] == 2'd1) {
+        type_option.weight = 0;
+        bins gva = {1'b1};
+    }
+    // ...and clear at V = 0
+    vitt_fault_no_gva: coverpoint zimt_trap_gva(ins) iff (zimt_vitt(ins)[1:0] == 2'd1) {
+        type_option.weight = 0;
+        bins no_gva = {1'b0};
+    }
+    // The tag width of the VITT range (zimt_vitt_range)
+    vitt_width: coverpoint zimt_vitt_range(ins)[65:64] {
+        type_option.weight = 0;
+        bins tag4 = {2'b10};
+`ifdef UDB_ZIMT_POINTER_TAG_WIDTH_7
+        bins tag7 = {2'b11};
+`endif
+    }
+    // {mstatus.MPRV, MPV, MPP}: MPP = U; and MPV = 1 with MPP = U or S
+    vitt_mprv_u_mode: coverpoint zimt_mprv_mpp(ins) {
+        type_option.weight = 0;
+        bins u = {4'b1000};
+    }
+    vitt_mprv_v_mode: coverpoint zimt_mprv_mpp(ins) {
+        type_option.weight = 0;
+        bins vu = {4'b1100};
+        bins vs = {4'b1101};
+    }
     // senvcfg.MT_MODE (U-mode's and VU-mode's), enabled
     senvcfg_mt: coverpoint zimt_senvcfg_mt(ins) {
         type_option.weight = 0;

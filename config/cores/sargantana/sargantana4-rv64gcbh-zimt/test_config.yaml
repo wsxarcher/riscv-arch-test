@@ -9,3 +9,5 @@ dut_include_dir: . # Directory containing DUT specific rvmodel_macros.h header
 experimental_extensions: [Zimt, Svatag, Smvatag]
 experimental_params:
   ZIMT_POINTER_TAG_WIDTH_7: true # 7-bit pointer tags (def_pkg::RV_ZIMT_TAG7), as in sail.json
+  SMVATAG_NO_M_MODE_VITT_RANGE: true # no VITT range in M-mode (load_store_queue.sv), as in the Sail model
+  SVATAG_NO_BARE_VITT_RANGE: true # nor with Bare translation, as in the Sail model

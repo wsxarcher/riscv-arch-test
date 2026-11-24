@@ -75,6 +75,22 @@ PTE.MTAG are not tag checked (the S-mode handlers of S_settag and S_checktag). N
 nonzero mtinst or htinst while it uses a tagcheck-exempt code page or MTAG_I, whose deposit in mstatus.MTAG_I and
 hstatus.MTAG_I depends on which traps write those (transformed instructions).
 
+With first-stage address translation and memory tagging enabled, Svatag protects the tag storage of the effective
+privilege mode: its regular accesses in its VITT range, mc_tag_va of its lowest to its highest virtual address, and its
+settags whose chunks overlap that range raise access faults. The tests put each tag table base so that the range holds
+no memory that the mode accesses, through page-table aliases where needed. S_checktag checks the range of S-mode at its
+edges (loads, also through sp, stores, LR/SC, AMOs, cbo.zero and settag, after their page faults and tag checks, and
+none with memory tagging disabled) and, through MPRV, that of U-mode (also with mstatus.MTAG_I, of vector loads and
+stores, and of a user tagged-data page in it, whose tag check comes first, with a matching and a mismatching pointer
+tag) and in U-mode itself; H_checktag, through MPRV with MPV = 1, those of VS-mode and VU-mode, those of VS-mode and
+VU-mode themselves, and those of HLV and HSV in HS-mode with hstatus.MTAG_I, and in HU-mode with hstatus.VUMT_MODE, and
+none of HLVX. U-mode and VU-mode run from a user alias of the code region, which the T-SBI mode switches relocate to. The ranges of M-mode
+(Smvatag) and of Bare first-stage translation (Svatag) are implementation-defined: the tests whose regular accesses or
+settags run with memory tagging enabled there take them as empty, and exist only without the extension or for a config
+that declares them empty (SMVATAG_NO_M_MODE_VITT_RANGE, SVATAG_NO_BARE_VITT_RANGE in its experimental_params). They are
+the _mt tests and the settag and checktag tests of M-mode and of Bare translation, also through MPRV and with the G
+stage only (vsatp Bare).
+
 Each register field is swept over x0-x31 where the instruction allows it. A swept register that the framework
 uses is saved and restored around the instruction. checktag and settag write no register: the trap signature
 checks that they raise no exception.
@@ -107,6 +123,12 @@ MASK128 = (1 << 128) - 1
 # Defined for a config whose Zimt supports 7-bit pointer tags (experimental_params in test_config.yaml). 4-bit pointer
 # tags are mandatory.
 TAG7 = "UDB_ZIMT_POINTER_TAG_WIDTH_7"
+# The VITT ranges of M-mode (Smvatag) and of the modes with Bare first-stage address translation (Svatag) are
+# implementation-defined. The tests whose regular loads and stores or settags run with memory tagging enabled there
+# take them as empty: they are assembled only without the extension or for a config that declares the range empty
+# (SMVATAG_NO_M_MODE_VITT_RANGE, SVATAG_NO_BARE_VITT_RANGE in the experimental_params of test_config.yaml).
+NO_M_VITT_RANGE = "!defined(SMVATAG_SUPPORTED) || defined(UDB_SMVATAG_NO_M_MODE_VITT_RANGE)"
+NO_BARE_VITT_RANGE = "!defined(SVATAG_SUPPORTED) || defined(UDB_SVATAG_NO_BARE_VITT_RANGE)"
 # rs1 of addtag, checktag and settag: a pointer with a nonzero pointer tag in bits 63:57
 TAGGED_POINTER = 0x5A00_0000_8000_1230
 # Written to rd before each instruction that writes rd, so that the signature shows the write
@@ -455,7 +477,8 @@ def _mt_mode_warl_tests(test_data: TestData, cg: str, csr: str, lsb: int = MT_MO
 
     The reserved encoding 01 is legalized to an implementation-defined value, and so is 11 without 7-bit pointer
     tags, so after writing them only check that the field holds a legal value: not 01, and not 11 either without
-    7-bit pointer tags. The field holds 11 only with them.
+    7-bit pointer tags. The field holds 11 only with them. The field is cleared before each record, so that with
+    mseccfg the signature store does not run with memory tagging enabled in M-mode (NO_M_VITT_RANGE).
     """
     field = "MT_MODE" if lsb == MT_MODE_LSB else "VUMT_MODE"
     coverpoint = f"cp_{field.lower()}_warl"
@@ -492,7 +515,7 @@ def _mt_mode_warl_tests(test_data: TestData, cg: str, csr: str, lsb: int = MT_MO
                 ]
             elif new == MT_TAG7:
                 cases += [f"#ifndef {TAG7} // 11 is reserved", *tag4_legal, f"#endif // {TAG7}"]
-            cases.append(write_sigupd(val, test_data))
+            cases += [f"LI(x{tmp}, {0b11 << lsb:#x})", f"csrc {csr}, x{tmp}", write_sigupd(val, test_data)]
         lines += _tag7(cases) if old == MT_TAG7 else cases
     lines.append(f"csrw {csr}, x{save}")
     test_data.int_regs.return_registers([save, val, tmp])
@@ -966,8 +989,10 @@ SVPBMT_GATE = "defined(SVPBMT_SUPPORTED)"
 # Pointers whose address bit 63 - PMLEN is set, bit 56 for PMLEN 7 and bit 47 for PMLEN 16: pointer masking sign-extends
 # it with address translation and zero-extends it without, so the chunk index has high bits set, and a tag table base
 # wraps the tag address around to the tag table. These are the masked addresses of chunk 0, whose tag offset from the
-# tag table base is a multiple of 4 KiB with both tag widths. The zero-extended one depends on PMLEN.
-SIGN_EXTENDED_BASE = 0xFFFF_FFFF_FFFE_0000
+# tag table base is a multiple of 4 KiB with both tag widths. The zero-extended one depends on PMLEN. The
+# sign-extended one is the lowest Sv39 address of the upper half: its tags start the S-mode tag storage range, which
+# then lies above the test image, where S-mode accesses would raise access faults.
+SIGN_EXTENDED_BASE = 0xFFFF_FFC0_0000_0000
 ZERO_EXTENDED_BASE = {7: 0x01FF_FFFF_FFFE_0000, 16: 0x0000_FFFF_FFFE_0000}
 # The Sm test checks MPRV only if S-mode can be the effective privilege, with its pointer masking and tag table, and
 # with MPV = 1 only if VS-mode and VU-mode can, with theirs
@@ -1548,6 +1573,7 @@ def _h_guest_settag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[st
             test_data, cg, mt_mode, case, "cp_settag_two_stage", int(VS_SV39.data_va, 16), setup
         )
     lines += [*guest_translation_teardown(test_data), *guest_translation_setup(test_data, SV39X4, None, "VSmode")]
+    g_stage = []
     for case, g_flags in H_G_STAGE_CASES:
         setup = [
             *create_page_mapping(
@@ -1560,10 +1586,14 @@ def _h_guest_settag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[st
             ),
             "hfence.gvma",
         ]
-        lines += _h_guest_settag_case(test_data, cg, mt_mode, case, "cp_settag_g_stage", int(SV39X4.data_va, 16), setup)
-    lines += _h_guest_settag_case(
+        g_stage += _h_guest_settag_case(
+            test_data, cg, mt_mode, case, "cp_settag_g_stage", int(SV39X4.data_va, 16), setup
+        )
+    g_stage += _h_guest_settag_case(
         test_data, cg, mt_mode, "g_stage_gpa_too_wide", "cp_settag_g_stage", H_GPA_TOO_WIDE, []
     )
+    # The G stage only: VS-mode's first-stage translation is Bare
+    lines += gated(g_stage, NO_BARE_VITT_RANGE)
     lines += [
         *guest_translation_teardown(test_data),
         f"LI(x{pte}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
@@ -3330,6 +3360,23 @@ MTAG_PAGES = {
 }
 # The data pages again, behind a level-1 non-leaf PTE with PTE.MTAG, 4 MiB above
 MTAG_NONLEAF_VA = MTAG_PAGE_VA + 0x40_0000
+# The pages again (each mode has one page table per level, indexed by the bits of the level: a level-1 PTE of this
+# 2 MiB region to the level-0 table of MTAG_PAGES maps them), for the user tags page of svittu: the VITT range of U-mode
+# (Svatag), from svittu, which then lies above the pages of the tests (with both tag widths), protects only the tags
+MTAG_ALIAS_VA = MTAG_PAGE_VA + 0x1460_0000
+# Svatag: with Sv39 the VITT range of U-mode (VU-mode) starts at svittu (vsvittu), and that of S-mode (VS-mode) at
+# svitts (vsvitts) + VITT_RANGE_S_OFFSET, (2^64 - 2^38) >> 5 with 4-bit tags and >> 4 with 8-bit tags; both are
+# VITT_RANGE_SIZE bytes, 2^38 >> 5 or >> 4. The 1 GiB region of MTAG_PAGES is mapped again that many bytes up (a root
+# PTE to its level-1 table), so that a range that starts at one of the pages ends with the page before it again, and
+# the page after the range is that page again.
+VITT_RANGE_S_OFFSET = {MT_TAG4: ((1 << 64) - (1 << 38)) >> 5, MT_TAG7: ((1 << 64) - (1 << 38)) >> 4}
+VITT_RANGE_SIZE = {MT_TAG4: 1 << 33, MT_TAG7: 1 << 34}
+# The chunk of the user tagged-data page of the tag check in the VITT range of U-mode (_s_vitt_tests)
+USER_VITT_OFFSET = 0x60
+# A user alias of the code region (a gigapage, in a root slot that the other tests do not use), from which U-mode runs
+# in _s_vitt_tests. It lies below the VITT ranges of U-mode there, which do not protect fetches anyway; S-mode takes the
+# traps (the framework delegates them) and reads the trapping instructions with its own privilege, which has no range
+U_CODE_VA = 0x1_0000_0000
 # Entry points of MTAG_CODE, each followed by a return through the third register of the code: a load into the second
 # register and a store of it through the first one, a checktag of the first one, and a load at the end of its first
 # page, which straddles its two pages
@@ -3359,15 +3406,17 @@ def _mtag_tag(page: str, offset: int, tag: int, mt_mode: int, regs: tuple[int, i
 
 
 def _mtag_mapping(test_data: TestData) -> list[str]:
-    """Map the pages of MTAG_PAGES, and MTAG_NONLEAF_VA through a level-1 non-leaf PTE with PTE.MTAG that points to
-    their level-0 page table. The checktag tests wrote the non-leaf PTEs above that table for SETTAG_VA."""
+    """Map the pages of MTAG_PAGES, and again MTAG_NONLEAF_VA through a level-1 non-leaf PTE with PTE.MTAG and
+    MTAG_ALIAS_VA through one without it, which point to their level-0 page table, and their 1 GiB region
+    VITT_RANGE_SIZE bytes up, through root PTEs to its level-1 table. The checktag tests wrote the non-leaf PTEs above
+    that table for SETTAG_VA."""
     a, b, c = test_data.int_regs.get_registers(3)
     regs = (a, b, c)
     lines = [
         comment_banner(
             "PTE.MTAG pages",
             f"Map the pages of the PTE.MTAG tests from {MTAG_PAGE_VA:#x}, and the data pages again behind a level-1\n"
-            f"non-leaf PTE with PTE.MTAG from {MTAG_NONLEAF_VA:#x}",
+            f"non-leaf PTE with PTE.MTAG from {MTAG_NONLEAF_VA:#x} and behind one without it from {MTAG_ALIAS_VA:#x}",
         ),
     ]
     for page in MTAG_PAGES.values():
@@ -3388,6 +3437,26 @@ def _mtag_mapping(test_data: TestData) -> list[str]:
             physical_address=SV39.page_table_label(0),
             regs=regs,
         ),
+        *write_pte(
+            SV39,
+            level=1,
+            flags=PteFlags.nonleaf(),
+            virtual_address=hex(MTAG_ALIAS_VA),
+            physical_address=SV39.page_table_label(0),
+            regs=regs,
+        ),
+        *[
+            line
+            for size in VITT_RANGE_SIZE.values()
+            for line in write_pte(
+                SV39,
+                level=2,
+                flags=PteFlags.nonleaf(),
+                virtual_address=hex(MTAG_PAGE_VA + size),
+                physical_address=SV39.page_table_label(1),
+                regs=regs,
+            )
+        ],
         "sfence.vma",
     ]
     test_data.int_regs.return_registers(list(regs))
@@ -3437,6 +3506,9 @@ def _s_mtag_tests(test_data: TestData, cg: str, mt_mode: int, code: tuple[int, i
     ptr, val, ret = code
     addr, tmp = test_data.int_regs.get_registers(2)
     good, bad = GOOD_TAG[mt_mode], BAD_TAG[mt_mode]
+    # The tags of the user pages in the alias of the user tags page, so that the VITT range of U-mode, from svittu, is
+    # above them
+    svittu = _extended_vitt(_mtag_va("user_tags") + MTAG_ALIAS_VA - MTAG_PAGE_VA, MTAG_PAGE_VA, mt_mode)
 
     def tag(page: str, offset: int, value: int) -> list[str]:
         return _mtag_tag(page, offset, value, mt_mode, (addr, tmp))
@@ -3766,12 +3838,13 @@ def _s_mtag_tests(test_data: TestData, cg: str, mt_mode: int, code: tuple[int, i
             comment_banner(
                 f"cp_checked_mprv_u_page (M, {name})",
                 "In M-mode with mstatus.MPRV = 1 and MPP = U, so with the Sv39 translation, memory tagging\n"
-                "(senvcfg.MT_MODE) and tag table (svittu, the tags page as a user page) of U-mode: a load of the user\n"
+                "(senvcfg.MT_MODE) and tag table (svittu, the tags page as a user page, at MTAG_ALIAS_VA) of U-mode:\n"
+                "a load of the user\n"
                 f"tagged-data page with a mismatching pointer tag: {SW_CHECK_TEXT}, which M-mode\n"
                 "takes; with the matching one: performed; and with a mismatching one, of a user page without\n"
                 "PTE.MTAG: not checked. Record rd",
             ),
-            f"LI(x{tmp}, {_extended_vitt(_mtag_va('user_tags'), MTAG_PAGE_VA, mt_mode):#x})",
+            f"LI(x{tmp}, {svittu:#x})",
             f"csrw CSR_SVITTU, x{tmp}",
             *_set_pmm(tmp, "SSNPM"),
             f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
@@ -3789,6 +3862,316 @@ def _s_mtag_tests(test_data: TestData, cg: str, mt_mode: int, code: tuple[int, i
             "csrw CSR_SVITTU, x0",
         ],
         "defined(U_SUPPORTED) && defined(SSNPM_SUPPORTED) && defined(STANDARD_SM_SUPPORTED)",
+    )
+    test_data.int_regs.return_registers([addr, tmp])
+    return lines
+
+
+def _s_vitt_tests(test_data: TestData, cg: str, mt_mode: int, code: tuple[int, int, int]) -> list[str]:
+    """Protection of tag storage (Svatag) in S-mode with Sv39 and memory tagging enabled with mt_mode: svitts puts the
+    VITT range of S-mode at the tags page of MTAG_PAGES, so that the executable page before it is not in it, its last
+    page is the executable page again (VITT_RANGE_SIZE bytes up), and the page after it the tags page again. A load and
+    a store in its first page, a load through sp there, LR, SC (reserved by an LR of the same address through the page
+    after, which is performed), amoadd.d and cbo.zero there, a load in its last page, and (with hardware misaligned
+    loads) loads from the page before into the first page and from the last page into the page after raise the access
+    fault of their kind, with the address of their first byte in the range; loads in the page before and in the page
+    after are performed. In the tagged-data page after the first one the tag check comes first (its tag address is not
+    canonical: a load page fault on it), and in the unmapped page after that its page fault. settag of a chunk in the
+    first page, of the last chunk of the page before and the first one of the range, or of the last chunk of the range
+    and the first one of the page after, raises a store/AMO access fault with its address, and so does settag of 16
+    chunks from the page before, of which only the last one is in the range; of the last chunk of the page before alone,
+    it raises the store/AMO page fault of its tag store, whose address is not canonical. A store from the page before
+    into the first page (with hardware misaligned stores performed byte by byte, which store its bytes in the page
+    before first) raises the store/AMO access fault at the first page. With memory tagging disabled, a load in the first
+    page is performed. Then, in M-mode with mstatus.MPRV = 1 and MPP = U, with svittu putting the VITT range of U-mode
+    at the user tags page: the same loads, the user page without PTE.MTAG before it, a load in the first page with
+    mstatus.MTAG_I = 1 (a load access fault), and (V) vle64.v and vse64.v there (a load and a store/AMO access fault at
+    element 0); then, with svittu putting the range over the MTAG pages, a load of the user tagged-data page in it with
+    the matching pointer tag (its tag check passes: the access fault), with a mismatching one (the software-check
+    exception) and with a mismatching one and mstatus.MTAG_I = 1 (unchecked: the access fault). Then U-mode itself,
+    from a user alias of the code region (U_CODE_VA), with svittu putting the range at the user tags page again: settag
+    and a load in its first page raise a store/AMO and a load access fault. The pages that these accesses perform are
+    not tagged-data pages. The load, store, cbo.zero and settag in the first page of the S-mode range, and the first
+    load, vle64.v and the U-mode settag and load of the U-mode range use a pointer with a pointer tag, which pointer
+    masking ignores. Record rd, the memory that the faulting sd, sc.d, amoadd.d and cbo.zero (whose cache block holds a pattern
+    before) would write, through the page after the range, vd of vle64.v (which holds a pattern) and the memory of
+    vse64.v. code holds the registers of MTAG_CODE."""
+    name = MT_NAMES[mt_mode]
+    ptr, val, _ = code
+    addr, tmp = test_data.int_regs.get_registers(2)
+    up = VITT_RANGE_SIZE[mt_mode]
+    first, before = _mtag_va("tags"), _mtag_va("executable")
+    tagged, unmapped = _mtag_va("tagged_before_unmapped"), _mtag_va("tagged_before_unmapped") + 0x1000
+    # The pointer tag of some cases, which pointer masking ignores: the range applies to the masked address
+    tag = SETTAG_TAG[mt_mode]
+
+    def access(
+        case: str, coverpoint: str, cgroup: str, va: int, instruction: str, arch: str = "", tag: int = 0
+    ) -> list[str]:
+        """ptr = va with pointer tag tag, val = RD_CANARY, then instruction (assembled with the extensions arch, if
+        any) labeled as the testcase case. Record val."""
+        lines = [f"LI(x{ptr}, {_tag_field(tag, mt_mode) | va:#x})", f"LI(x{val}, {RD_CANARY:#x})"]
+        if arch:
+            lines += _regular_access(test_data, cgroup, coverpoint, case, arch, [instruction])
+        else:
+            lines += [test_data.add_testcase(case, coverpoint, cgroup), instruction]
+        return [*lines, write_sigupd(val, test_data)]
+
+    def s(case: str, va: int, instruction: str = f"ld x{val}, 0(x{ptr})", arch: str = "", tag: int = 0) -> list[str]:
+        return access(f"S_{name}_vitt_{case}", "cp_vitt", cg, va, instruction, arch, tag)
+
+    def record(offset: int) -> list[str]:
+        """Record the doubleword at offset in the tags page, through the page after the range: whether a store that
+        faulted wrote it. Its tags page offsets 0x18-0x27 and 0x840-0x87F hold no tags."""
+        return [f"LI(x{tmp}, {first + up + offset:#x})", f"ld x{val}, 0(x{tmp})", write_sigupd(val, test_data)]
+
+    def cbo_zero() -> list[str]:
+        """cbo.zero in the first page, whose cache block, through the page after the range, holds a nonzero pattern
+        before, is recorded after, and holds zeros again."""
+        block = first + up + 0x840
+        case = [
+            f"LI(x{tmp}, {block:#x})",
+            f"LI(x{val}, {CBO_ZERO_PATTERN:#x})",
+            *[f"sd x{val}, {8 * i}(x{tmp})" for i in range(8)],
+            *s("cbo_zero_first", first + 0x848, f"cbo.zero (x{ptr})", "+zicboz", tag=tag),
+            f"LI(x{tmp}, {block:#x})",
+        ]
+        case += [line for i in range(8) for line in (f"ld x{val}, {8 * i}(x{tmp})", write_sigupd(val, test_data))]
+        return [*case, *[f"sd x0, {8 * i}(x{tmp})" for i in range(8)]]
+
+    def s_sp(case: str, va: int) -> list[str]:
+        """A load through sp = va, which the protection does not exempt (the trap handlers swap sp). Record val."""
+        return [
+            f"LI(x{ptr}, {va:#x})",
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"mv x{addr}, sp",
+            f"mv sp, x{ptr}",
+            test_data.add_testcase(f"S_{name}_vitt_{case}", "cp_vitt", cg),
+            f"ld x{val}, 0(sp)",
+            f"mv sp, x{addr}",
+            write_sigupd(val, test_data),
+        ]
+
+    lines = [
+        comment_banner(
+            f"cp_vitt (S, {name})",
+            f"In S-mode with Sv39 and {TAG_BITS[mt_mode]}-bit tags, with svitts putting the VITT range of S-mode\n"
+            f"({VITT_RANGE_SIZE[mt_mode]:#x} bytes from svitts + {VITT_RANGE_S_OFFSET[mt_mode]:#x}) at the tags page:\n"
+            "regular accesses in the range raise the access fault of their kind, after their page fault and their\n"
+            "tag check, and those before and after it none; settag of chunks in it a store/AMO access fault. Record rd",
+        ),
+        *_set_pmm(tmp, "SMNPM"),
+        f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
+        f"or x{tmp}, x{tmp}, x{addr}",
+        tsbi_call(f"csrs menvcfg, x{tmp}"),
+        f"LI(x{tmp}, {(first - VITT_RANGE_S_OFFSET[mt_mode]) & MASK64:#x})",
+        f"csrw CSR_SVITTS, x{tmp}",
+        *s("ld_first", first + 0x10, tag=tag),
+        *s("sd_first", first + 0x18, f"sd x{val}, 0(x{ptr})", tag=tag),
+        *record(0x18),
+        *s_sp("ld_sp_first", first + 0x28),
+        *s("ld_before", before + 0xFF8),
+        *s("ld_last", before + up + 0xFF8),
+        *s("ld_after", first + up + 0x10),
+        *s("ld_tag_check", tagged + 0x10),
+        *s("ld_unmapped", unmapped + 0x10),
+        *gated(
+            [
+                *s("ld_into_first", before + 0xFFC),
+                *s("ld_out_of_last", before + up + 0xFFC),
+                # Its bytes in the page before are stored first (byte by byte): record them and restore the data
+                *s("sd_into_first", before + 0xFFC, f"sd x{val}, 0(x{ptr})"),
+                f"LI(x{tmp}, {before + 0xFF8:#x})",
+                f"ld x{val}, 0(x{tmp})",
+                write_sigupd(val, test_data),
+                f"LI(x{val}, {_check_data_dword(255, 1):#x})",
+                f"sd x{val}, 0(x{tmp})",
+            ],
+            PAGE_CROSSING_GATE,
+        ),
+        *gated(
+            [
+                *s("lr_first", first + 0x20, f"lr.d x{val}, (x{ptr})", "+zalrsc"),
+                # The SC has a reservation, from an LR of the same physical address through the page after the range,
+                # so that it may not fail without the access fault ("a failed SC may be treated like a store")
+                *s("lr_after", first + up + 0x20, f"lr.d x{val}, (x{ptr})", "+zalrsc"),
+                *s("sc_first", first + 0x20, f"sc.d x{val}, x{val}, (x{ptr})", "+zalrsc"),
+                *record(0x20),
+            ],
+            "defined(ZALRSC_SUPPORTED)",
+        ),
+        *gated(
+            [*s("amoadd_d_first", first + 0x20, f"amoadd.d x{val}, x{val}, (x{ptr})", "+zaamo"), *record(0x20)],
+            "defined(ZAAMO_SUPPORTED)",
+        ),
+        *gated(cbo_zero(), "defined(ZICBOZ_SUPPORTED)"),
+        *s("settag_first", first + 0x10, f"settag x{ptr}, 0", tag=tag),
+        *s("settag_into_first", before + 0xFF8, f"settag x{ptr}, 1"),
+        *s("settag_out_of_last", before + up + 0xFF8, f"settag x{ptr}, 1"),
+        *s("settag_before", before + 0xFF8, f"settag x{ptr}, 0"),
+        *s("settag_16_into_first", before + 0xF10, f"settag x{ptr}, 15"),
+        # With memory tagging disabled, there is no VITT range
+        f"LI(x{tmp}, {0b11 << MT_MODE_LSB:#x})",
+        tsbi_call(f"csrc menvcfg, x{tmp}"),
+        *access(
+            f"S_{name}_vitt_ld_first_mt_disabled", "cp_vitt_mt_disabled", cg, first + 0x10, f"ld x{val}, 0(x{ptr})"
+        ),
+        "csrw CSR_SVITTS, x0",
+        f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
+        tsbi_call(f"csrc menvcfg, x{tmp}"),
+    ]
+
+    def mprv_u_load(
+        case: str,
+        va: int,
+        instruction: str = f"ld x{val}, 0(x{ptr})",
+        arch: str = "",
+        coverpoint: str = "cp_vitt_mprv_u",
+        mtag_i: bool = False,
+        ptag: int = 0,
+    ) -> list[str]:
+        """In M-mode, instruction (a load by default; assembled with the extensions arch, if any) with mstatus.MPRV = 1
+        and MPP = U (and with mtag_i mstatus.MTAG_I = 1, which only disables tag checks) through ptr = va with pointer
+        tag ptag. Record val."""
+        mstatus = f"MSTATUS_MPRV{f' | {1 << MSTATUS_MTAG_I_BIT:#x}' if mtag_i else ''}"
+        lines = [
+            f"LI(x{ptr}, {_tag_field(ptag, mt_mode) | va:#x})",
+            f"LI(x{val}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, MSTATUS_MPP)",
+            f"csrc mstatus, x{tmp}",
+            f"LI(x{tmp}, {mstatus})",
+            f"csrs mstatus, x{tmp}",
+        ]
+        if arch:
+            lines += _regular_access(
+                test_data, "Zimt_Sm_cg", coverpoint, f"M_{name}_vitt_u_{case}", arch, [instruction]
+            )
+        else:
+            lines += [test_data.add_testcase(f"M_{name}_vitt_u_{case}", coverpoint, "Zimt_Sm_cg"), instruction]
+        return [*lines, f"csrc mstatus, x{tmp}", write_sigupd(val, test_data)]
+
+    u_first, u_before = _mtag_va("user_tags"), _mtag_va("user_untagged")
+    lines += gated(
+        [
+            comment_banner(
+                f"cp_vitt_mprv_u (M, U, {name})",
+                "In M-mode with mstatus.MPRV = 1 and MPP = U, with Sv39, memory tagging (senvcfg.MT_MODE) and svittu\n"
+                "putting the VITT range of U-mode at the user tags page: loads in its first and last pages, and from\n"
+                "the page before into the first one and from the last one into the page after, raise a load access\n"
+                "fault, which M-mode takes; those in the user page before it and in the page after it none. Record rd",
+            ),
+            f"LI(x{tmp}, {u_first:#x})",
+            f"csrw CSR_SVITTU, x{tmp}",
+            *_set_pmm(tmp, "SSNPM"),
+            f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
+            f"or x{tmp}, x{tmp}, x{addr}",
+            f"csrs senvcfg, x{tmp}",
+            "RVTEST_TSBI_GOTO_MMODE",
+            *mprv_u_load("first", u_first + 0x10, ptag=tag),
+            *mprv_u_load("before", u_before + 0xFF8),
+            *mprv_u_load("last", u_before + up + 0xFF8),
+            *mprv_u_load("after", u_first + up + 0x10),
+            *gated(
+                [*mprv_u_load("into_first", u_before + 0xFFC), *mprv_u_load("out_of_last", u_before + up + 0xFFC)],
+                PAGE_CROSSING_GATE,
+            ),
+            *mprv_u_load("first_mtag_i", u_first + 0x18, coverpoint="cp_vitt_mtag_i", mtag_i=True),
+            # A tag check that passes in the range comes before the access fault: svittu without the alias of
+            # _mtag_mapping puts the range over the MTAG pages and the tags of their chunks in the user tags page. A
+            # load of the user tagged-data page with the matching pointer tag raises the load access fault, with a
+            # mismatching one the software-check exception
+            f"LI(x{tmp}, {_extended_vitt(u_first, MTAG_PAGE_VA, mt_mode):#x})",
+            f"csrw CSR_SVITTU, x{tmp}",
+            *_mtag_tag("user", USER_VITT_OFFSET, GOOD_TAG[mt_mode], mt_mode, (addr, tmp)),
+            *mprv_u_load("tagged_match", _mtag_va("user", USER_VITT_OFFSET), ptag=GOOD_TAG[mt_mode]),
+            *mprv_u_load("tagged_mismatch", _mtag_va("user", USER_VITT_OFFSET), ptag=BAD_TAG[mt_mode]),
+            *mprv_u_load(
+                "tagged_mtag_i",
+                _mtag_va("user", USER_VITT_OFFSET),
+                coverpoint="cp_vitt_mtag_i",
+                mtag_i=True,
+                ptag=BAD_TAG[mt_mode],
+            ),
+            f"LI(x{tmp}, {u_first:#x})",
+            f"csrw CSR_SVITTU, x{tmp}",
+            *gated(
+                [
+                    f"LI(x{tmp}, MSTATUS_VS)",
+                    f"csrs mstatus, x{tmp}",
+                    ".option push",
+                    ".option arch, +v",
+                    "vsetivli x0, 2, e64, m1, ta, ma",
+                    f"LI(x{val}, {VECTOR_PATTERN[0]:#x})",
+                    f"vmv.v.x v24, x{val}",
+                    ".option pop",
+                    *mprv_u_load("vle_first", u_first + 0x20, f"vle64.v v24, (x{ptr})", "+v", ptag=tag),
+                    *_record_vreg(test_data, val, 24),
+                    *mprv_u_load("vse_first", u_first + 0x30, f"vse64.v v24, (x{ptr})", "+v"),
+                    # The doublewords of vse64.v, through the identity mapping of the tags page
+                    f"LA(x{tmp}, {MTAG_TAGS} + 0x30)",
+                    *[line for i in range(2) for line in (f"ld x{val}, {8 * i}(x{tmp})", write_sigupd(val, test_data))],
+                ],
+                "defined(V_SUPPORTED)",
+            ),
+            "RVTEST_TSBI_GOTO_SMODE",
+            f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
+            f"csrc senvcfg, x{tmp}",
+            "csrw CSR_SVITTU, x0",
+        ],
+        "defined(U_SUPPORTED) && defined(SSNPM_SUPPORTED) && defined(STANDARD_SM_SUPPORTED)",
+    )
+    # U-mode itself runs from U_CODE_VA, which S-mode registers as the alias of the code region (in the S save area of
+    # the trap handler) only meanwhile: RVTEST_TSBI_GOTO_UMODE resumes there, and RVTEST_TSBI_GOTO_SMODE back in the
+    # code region. The signature is not a user page, so S-mode records rd
+    shift = SV39.page_offset_bits(SV39.levels - 1)
+    lines += gated(
+        [
+            comment_banner(
+                f"cp_vitt_u (U, {name})",
+                "In U-mode with Sv39 and memory tagging (senvcfg.MT_MODE), from a user alias of the code region, with\n"
+                "svittu putting the VITT range of U-mode at the user tags page: settag and a load in its first page\n"
+                "raise a store/AMO and a load access fault. Record rd",
+            ),
+            *write_pte(
+                SV39,
+                level=SV39.levels - 1,
+                flags=PteFlags(user=True, write=False),
+                virtual_address=hex(U_CODE_VA),
+                physical_address="rvtest_code_begin",
+                regs=(addr, tmp, val),
+                superpage=True,
+            ),
+            "sfence.vma",
+            f"LI(x{addr}, {U_CODE_VA:#x})",
+            f"LA(x{tmp}, rvtest_code_begin)",
+            f"slli x{tmp}, x{tmp}, {64 - shift}",
+            f"srli x{tmp}, x{tmp}, {64 - shift}",
+            f"or x{addr}, x{addr}, x{tmp}",
+            f"LA(x{tmp}, Stramptbl_sv)",
+            f"SREG x{addr}, code_bgn_off(x{tmp})",
+            f"LI(x{tmp}, {u_first:#x})",
+            f"csrw CSR_SVITTU, x{tmp}",
+            *_set_pmm(tmp, "SSNPM"),
+            f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
+            f"or x{tmp}, x{tmp}, x{addr}",
+            f"csrs senvcfg, x{tmp}",
+            "RVTEST_TSBI_GOTO_UMODE",
+            f"LI(x{ptr}, {_tag_field(tag, mt_mode) | (u_first + 0x28):#x})",
+            f"LI(x{val}, {RD_CANARY:#x})",
+            test_data.add_testcase(f"U_{name}_vitt_settag_first", "cp_vitt_u", "Zimt_U_cg"),
+            f"settag x{ptr}, 0",
+            test_data.add_testcase(f"U_{name}_vitt_ld_first", "cp_vitt_u", "Zimt_U_cg"),
+            f"ld x{val}, 0(x{ptr})",
+            "RVTEST_TSBI_GOTO_SMODE",
+            write_sigupd(val, test_data),
+            f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
+            f"csrc senvcfg, x{tmp}",
+            "csrw CSR_SVITTU, x0",
+            f"LA(x{addr}, rvtest_code_begin)",
+            f"LA(x{tmp}, Stramptbl_sv)",
+            f"SREG x{addr}, code_bgn_off(x{tmp})",
+        ],
+        "defined(U_SUPPORTED) && defined(SSNPM_SUPPORTED)",
     )
     test_data.int_regs.return_registers([addr, tmp])
     return lines
@@ -3928,8 +4311,10 @@ VS_FAULT_VA = VS_MTAG_VA + 0x4000
 VS_G_FAULT_VA = VS_MTAG_VA + 0x5000
 VS_EXEMPT_CODE_VA = VS_MTAG_VA + 0x6000
 VS_NORMAL_CODE_VA = VS_MTAG_VA + 0x7000
-# The tag page that VS_SV39.data_va maps, again as a user page, for the tag loads of VU-mode
-VS_USER_TAGS_VA = VS_MTAG_VA + 0x8000
+# The tag page that VS_SV39.data_va maps, again as a user page, for the tag loads of VU-mode; it is in another 2 MiB
+# region, whose VS-stage level-1 PTE points to the level-0 table of the guest pages (VS_SV39 has one table per level),
+# so that the VITT range of VU-mode (Svatag), from vsvittu, lies above the guest pages with both tag widths
+VS_USER_TAGS_VA = VS_MTAG_VA + 0x8000 + 0x1420_0000
 VS_CODE_GPA = int(SV39X4.data_va, 16) + 0x3000
 G_FAULT_GPA = int(SV39X4.data_va, 16) + 0x4000
 # A virtual page whose VS-stage level-1 PTE points to a page table at G_FAULT_GPA: its VS-stage walk takes a guest-page
@@ -4355,6 +4740,266 @@ def _h_mprv_vu_paging_tests(test_data: TestData, mt_mode: int, regs: tuple[int, 
     ]
 
 
+def _h_mprv_vitt_tests(test_data: TestData, mt_mode: int, regs: tuple[int, int, int]) -> list[str]:
+    """Protection of tag storage (Svatag) of the loads in M-mode with mstatus.MPRV = 1 and MPV = 1, with two-stage
+    translation: with MPP = S (VS-mode, henvcfg.MT_MODE), vsvitts puts the VITT range of VS-mode at the guest page
+    without PTE.MTAG after VS_MTAG_VA, and with MPP = U (VU-mode, senvcfg.MT_MODE) vsvittu that of VU-mode at the user
+    page without PTE.MTAG: a load there, through a pointer with a pointer tag, which pointer masking (henvcfg.PMM,
+    senvcfg.PMM) ignores, raises a load access fault with GVA = 1, which M-mode takes; one in the tagged-data page
+    before it, unchecked with mstatus.MTAG_I = 1, none. Needs the mappings of _h_mprv_vu_paging_tests, and
+    henvcfg.MT_MODE and PMM of the caller, which it keeps."""
+    rd, addr, tmp = regs
+    name = MT_NAMES[mt_mode]
+    offset = 16 * VS_PAGE_CHUNK
+    lines = [
+        comment_banner(
+            f"cp_vitt_mprv_v (M, VS, VU, {name})",
+            "In M-mode with mstatus.MPRV = 1 and MPV = 1, and two-stage translation: with MPP = S, vsvitts putting\n"
+            "the VITT range of VS-mode at the guest page without PTE.MTAG, a load there raises a load access fault\n"
+            "with GVA = 1, and one in the tagged-data page before it (unchecked with mstatus.MTAG_I = 1) none; with\n"
+            "MPP = U and vsvittu the same for VU-mode, at the user page without PTE.MTAG. Record rd",
+        ),
+        f"LI(x{tmp}, {(VS_PLAIN_VA - VITT_RANGE_S_OFFSET[mt_mode]) & MASK64:#x})",
+        f"csrw CSR_VSVITTS, x{tmp}",
+        f"LI(x{tmp}, {VS_USER_VA:#x})",
+        f"csrw CSR_VSVITTU, x{tmp}",
+        *_set_pmm(tmp, "SSNPM"),
+        f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
+        f"or x{tmp}, x{tmp}, x{addr}",
+        f"csrs senvcfg, x{tmp}",
+        "RVTEST_TSBI_GOTO_MMODE",
+    ]
+    for case, mpp, va, mtag_i in (
+        ("vs_first", 1, VS_PLAIN_VA, False),
+        ("vs_before", 1, VS_MTAG_VA + 0xFF0, True),
+        ("vu_first", 0, VS_USER_VA, False),
+        ("vu_before", 0, VS_USER_MTAG_VA + 0xFF0, True),
+    ):
+        mstatus = f"MSTATUS_MPRV | MSTATUS_MPV{f' | {1 << MSTATUS_MTAG_I_BIT:#x}' if mtag_i else ''}"
+        # In the range, with a pointer tag, which pointer masking ignores
+        pointer = va if mtag_i else _tag_field(SETTAG_TAG[mt_mode], mt_mode) | (va + offset)
+        lines += [
+            f"LI(x{addr}, {pointer:#x})",
+            f"LI(x{rd}, {RD_CANARY:#x})",
+            f"LI(x{tmp}, MSTATUS_MPP)",
+            f"csrc mstatus, x{tmp}",
+            f"LI(x{tmp}, {mstatus}{f' | {1 << 11:#x}' if mpp else ''})    # MPP = {'S' if mpp else 'U'}",
+            f"csrs mstatus, x{tmp}",
+            test_data.add_testcase(f"M_{name}_vitt_{case}", "cp_vitt_mprv_v", "Zimt_Sm_cg"),
+            f"ld x{rd}, 0(x{addr})",
+            f"csrc mstatus, x{tmp}",
+            write_sigupd(rd, test_data),
+        ]
+    return [
+        *lines,
+        "RVTEST_TSBI_GOTO_SMODE",
+        f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
+        f"csrc senvcfg, x{tmp}",
+        "csrw CSR_VSVITTS, x0",
+        "csrw CSR_VSVITTU, x0",
+    ]
+
+
+def _h_hlsv_vitt_tests(test_data: TestData, mt_mode: int, regs: tuple[int, int, int]) -> list[str]:
+    """Protection of tag storage (Svatag) of VS-mode, whose load and settag in the first page of its range raise a load
+    and a store/AMO access fault, which HS-mode takes, and of HLV and HSV, in HS-mode with two-stage translation: with
+    hstatus.SPVP = 1 (VS-mode, henvcfg.MT_MODE), vsvitts puts the VITT range of VS-mode at the guest page without
+    PTE.MTAG, and with SPVP = 0 (VU-mode, senvcfg.MT_MODE) vsvittu that of VU-mode at the VS-stage user tagged-data
+    page, while svitts, the tag table base of HS-mode, is 32 GiB above that page, so that neither of its ranges holds
+    those pages: hlv.d and hsv.d there, through a pointer with a pointer tag, which pointer masking (henvcfg.PMM,
+    senvcfg.PMM, and hstatus.HUPMM in HU-mode below) ignores, raise a load and a store/AMO access fault with GVA = 1,
+    with hstatus.MTAG_I = 1, which only disables their tag checks. hstatus.MTAG_I is set right before each of them: a
+    trap that writes a nonzero htinst (a transformed instruction, which a hart may write for these access faults)
+    deposits 0 in it, the MTAG bit of the code page of an instruction executed at V = 0, and the VU cases at the
+    tagged-data page would then be checked. hlvx.wu, which is not a regular access, at a VS-stage code page in the range
+    of VS-mode is performed. Then, with vsvittu putting the range of VU-mode at the VS-stage user page without PTE.MTAG,
+    VU-mode's own settag and load there raise a store/AMO and a load access fault, which HS-mode takes (VU-mode runs
+    from the guest code alias, which is a user page meanwhile); and in HU-mode (hstatus.HU = 1) with SPVP = 0, whose HLV
+    and HSV use hstatus.VUMT_MODE for VU-mode, hlv.d and hsv.d there raise them with VUMT_MODE set and senvcfg.MT_MODE =
+    00, and none with senvcfg.MT_MODE set instead (which U-mode then uses, with Bare translation). Record rd, and in
+    HS-mode the check data that the accesses map, which hsv.d keeps. Needs the mappings of _h_hlsv_paging_tests, and
+    henvcfg.MT_MODE and PMM of the caller, which it keeps."""
+    rd, addr, tmp = regs
+    save = test_data.int_regs.get_register()
+    name = MT_NAMES[mt_mode]
+    lines = [
+        comment_banner(
+            f"cp_vitt_v, cp_vitt_hlsv, cp_vitt_hlvx, cp_vitt_hlsv_hu (VS, HS, VU, HU, {name})",
+            "In VS-mode, a load and settag in the first page of its VITT range: a load and a store/AMO access fault.\n"
+            "In HS-mode with two-stage translation and hstatus.MTAG_I = 1: hlv.d and hsv.d with hstatus.SPVP = 1 at\n"
+            "the guest page without PTE.MTAG and with SPVP = 0 at the VS-stage user tagged-data page, the first pages\n"
+            "of the VITT ranges of their guest modes (vsvitts, vsvittu; not svitts): a load access fault and a\n"
+            "store/AMO access fault with GVA = 1; hlvx.wu in the range of VS-mode is performed. With vsvittu at the\n"
+            "VS-stage user page without PTE.MTAG: VU-mode's settag and load there raise the access faults, and in\n"
+            "HU-mode with SPVP = 0 hlv.d and hsv.d with hstatus.VUMT_MODE set, none with senvcfg.MT_MODE set instead.\n"
+            "Record rd",
+        ),
+        f"LI(x{tmp}, {(VS_PLAIN_VA - VITT_RANGE_S_OFFSET[mt_mode]) & MASK64:#x})",
+        f"csrw CSR_VSVITTS, x{tmp}",
+        f"LI(x{tmp}, {VS_USER_MTAG_VA:#x})",
+        f"csrw CSR_VSVITTU, x{tmp}",
+        f"LI(x{tmp}, {VS_USER_MTAG_VA + (1 << 35):#x})",
+        f"csrw CSR_SVITTS, x{tmp}",
+        *_set_pmm(tmp, "SSNPM"),
+        f"LI(x{addr}, {mt_mode << MT_MODE_LSB:#x})",
+        f"or x{tmp}, x{tmp}, x{addr}",
+        f"csrs senvcfg, x{tmp}",
+        f"csrr x{save}, hstatus",
+        # VS-mode itself: a load and a settag in the first page of its range, whose traps HS-mode takes
+        "RVTEST_TSBI_GOTO_VSMODE",
+        f"LI(x{addr}, {_tag_field(SETTAG_TAG[mt_mode], mt_mode) | (VS_PLAIN_VA + 16 * VS_PAGE_CHUNK + 8):#x})",
+        f"LI(x{rd}, {RD_CANARY:#x})",
+        test_data.add_testcase(f"VS_{name}_vitt_ld_first", "cp_vitt_v", "Zimt_H_cg"),
+        f"ld x{rd}, 0(x{addr})",
+        write_sigupd(rd, test_data),
+        test_data.add_testcase(f"VS_{name}_vitt_settag_first", "cp_vitt_v", "Zimt_H_cg"),
+        f"settag x{addr}, 0",
+        "RVTEST_TSBI_GOTO_SMODE",
+    ]
+    mtag_i = [f"LI(x{tmp}, {1 << HSTATUS_MTAG_I_BIT:#x})", f"csrs hstatus, x{tmp}"]
+
+    def record() -> list[str]:
+        """In HS-mode, record the doubleword of the check data that the guest pages of the accesses map: whether hsv.d
+        wrote it."""
+        return [
+            f"LA(x{tmp}, {CHECK_DATA} + {16 * VS_PAGE_CHUNK + 8:#x})",
+            f"ld x{rd}, 0(x{tmp})",
+            write_sigupd(rd, test_data),
+        ]
+
+    for case, spvp, va in (("vs", True, VS_PLAIN_VA), ("vu", False, VS_USER_MTAG_VA)):
+        lines += [
+            f"LI(x{tmp}, HSTATUS_SPVP)",
+            f"csr{'s' if spvp else 'c'} hstatus, x{tmp}",
+            f"LI(x{addr}, {_tag_field(SETTAG_TAG[mt_mode], mt_mode) | (va + 16 * VS_PAGE_CHUNK + 8):#x})",
+            f"LI(x{rd}, {RD_CANARY:#x})",
+            *mtag_i,
+            test_data.add_testcase(f"HS_{name}_vitt_hlv_{case}_first", "cp_vitt_hlsv", "Zimt_H_cg"),
+            f"hlv.d x{rd}, (x{addr})",
+            write_sigupd(rd, test_data),
+            *mtag_i,
+            test_data.add_testcase(f"HS_{name}_vitt_hsv_{case}_first", "cp_vitt_hlsv", "Zimt_H_cg"),
+            f"hsv.d x{rd}, (x{addr})",
+            *record(),
+        ]
+
+    # HLVX is not a regular access: with vsvitts putting the range of VS-mode at the VS-stage code page without
+    # PTE.MTAG, hlvx.wu there is performed
+    lines += [
+        f"LI(x{tmp}, {(VS_NORMAL_CODE_VA - VITT_RANGE_S_OFFSET[mt_mode]) & MASK64:#x})",
+        f"csrw CSR_VSVITTS, x{tmp}",
+        f"LI(x{tmp}, HSTATUS_SPVP)",
+        f"csrs hstatus, x{tmp}",
+        f"LI(x{addr}, {VS_NORMAL_CODE_VA:#x})",
+        f"LI(x{rd}, {RD_CANARY:#x})",
+        test_data.add_testcase(f"HS_{name}_vitt_hlvx_first", "cp_vitt_hlvx", "Zimt_H_cg"),
+        f"hlvx.wu x{rd}, (x{addr})",
+        write_sigupd(rd, test_data),
+        f"LI(x{tmp}, {(VS_PLAIN_VA - VITT_RANGE_S_OFFSET[mt_mode]) & MASK64:#x})",
+        f"csrw CSR_VSVITTS, x{tmp}",
+    ]
+
+    def hu_access(case: str) -> list[str]:
+        """In HU-mode, hlv.d and hsv.d at the first chunk of VS_PAGE_CHUNK of the user page without PTE.MTAG."""
+        return [
+            "RVTEST_TSBI_GOTO_UMODE",
+            f"LI(x{addr}, {_tag_field(SETTAG_TAG[mt_mode], mt_mode) | (VS_USER_VA + 16 * VS_PAGE_CHUNK + 8):#x})",
+            f"LI(x{rd}, {RD_CANARY:#x})",
+            test_data.add_testcase(f"HU_{name}_vitt_hlv_{case}", "cp_vitt_hlsv_hu", "Zimt_H_cg"),
+            f"hlv.d x{rd}, (x{addr})",
+            write_sigupd(rd, test_data),
+            test_data.add_testcase(f"HU_{name}_vitt_hsv_{case}", "cp_vitt_hlsv_hu", "Zimt_H_cg"),
+            f"hsv.d x{rd}, (x{addr})",
+            "RVTEST_TSBI_GOTO_SMODE",
+            *record(),
+        ]
+
+    # vsvittu puts the VITT range of VU-mode at the user page without PTE.MTAG (mapped as _h_mprv_vu_paging_tests maps
+    # it), so that the accesses there are not tag checked
+    lines += [
+        *create_page_mapping(
+            VS_SV39,
+            leaf_level=0,
+            leaf_flags=PteFlags(user=True, execute=False),
+            virtual_address=hex(VS_USER_VA),
+            physical_address=hex(VS_MTAG_GPA),
+            regs=regs,
+            pa_is_label=False,
+        ),
+        "hfence.vvma",
+        f"LI(x{tmp}, {VS_USER_VA:#x})",
+        f"csrw CSR_VSVITTU, x{tmp}",
+        # VU-mode itself (senvcfg.MT_MODE): settag and a load there, from the guest code alias, which is a user page
+        # meanwhile (VS-mode does not run then). The alias is in the VITT range of VU-mode, which does not protect its
+        # fetches, nor the HLVX with which HS-mode, which takes the traps, reads the trapping instructions. The
+        # signature is not a user page, so HS-mode records rd
+        *write_pte(
+            VS_SV39,
+            level=VS_SV39.levels - 1,
+            flags=PteFlags(user=True),
+            virtual_address=VS_SV39.code_va,
+            physical_address=SV39X4.code_va,
+            regs=regs,
+            pa_is_label=False,
+            superpage=True,
+        ),
+        "hfence.vvma",
+        "RVTEST_TSBI_GOTO_VUMODE",
+        f"LI(x{addr}, {_tag_field(SETTAG_TAG[mt_mode], mt_mode) | (VS_USER_VA + 16 * VS_PAGE_CHUNK + 8):#x})",
+        f"LI(x{rd}, {RD_CANARY:#x})",
+        test_data.add_testcase(f"VU_{name}_vitt_settag_first", "cp_vitt_v", "Zimt_H_cg"),
+        f"settag x{addr}, 0",
+        test_data.add_testcase(f"VU_{name}_vitt_ld_first", "cp_vitt_v", "Zimt_H_cg"),
+        f"ld x{rd}, 0(x{addr})",
+        "RVTEST_TSBI_GOTO_SMODE",
+        write_sigupd(rd, test_data),
+        *write_pte(
+            VS_SV39,
+            level=VS_SV39.levels - 1,
+            flags=PteFlags(),
+            virtual_address=VS_SV39.code_va,
+            physical_address=SV39X4.code_va,
+            regs=regs,
+            pa_is_label=False,
+            superpage=True,
+        ),
+        "hfence.vvma",
+        # HU-mode (hstatus.HU = 1) with SPVP = 0: HLV and HSV use hstatus.VUMT_MODE, not senvcfg.MT_MODE, for the
+        # memory tagging of VU-mode
+        f"LI(x{tmp}, {0b11 << MT_MODE_LSB:#x})",
+        f"csrc senvcfg, x{tmp}",
+        f"LI(x{tmp}, HSTATUS_SPVP)",
+        f"csrc hstatus, x{tmp}",
+        *_set_pmm(tmp, "SSNPM"),
+        f"slli x{tmp}, x{tmp}, {HUPMM_LSB - PMM_LSB}",
+        f"csrs hstatus, x{tmp}",
+        f"LI(x{tmp}, HSTATUS_HU | {mt_mode << VUMT_MODE_LSB:#x})",
+        f"csrs hstatus, x{tmp}",
+        *hu_access("vumt"),
+    ]
+    # With senvcfg.MT_MODE set instead, they have no VITT range; U-mode then has memory tagging, with Bare translation
+    lines += gated(
+        [
+            f"LI(x{tmp}, {0b11 << VUMT_MODE_LSB:#x})",
+            f"csrc hstatus, x{tmp}",
+            f"LI(x{tmp}, {mt_mode << MT_MODE_LSB:#x})",
+            f"csrs senvcfg, x{tmp}",
+            *hu_access("senvcfg"),
+        ],
+        NO_BARE_VITT_RANGE,
+    )
+    lines += [
+        f"csrw hstatus, x{save}",
+        f"LI(x{tmp}, {(0b11 << MT_MODE_LSB) | (0b11 << PMM_LSB):#x})",
+        f"csrc senvcfg, x{tmp}",
+        "csrw CSR_SVITTS, x0",
+        "csrw CSR_VSVITTS, x0",
+        "csrw CSR_VSVITTU, x0",
+    ]
+    test_data.int_regs.return_registers([save])
+    return lines
+
+
 def _h_g_stage_mtag_tests(test_data: TestData, cg: str, regs: tuple[int, int, int]) -> list[str]:
     """With the G stage only and memory tagging disabled in VS-mode, a G-stage leaf PTE with PTE.MTAG, which is reserved
     there: in VS-mode, a load and a store of its guest physical page raise a load and a store/AMO guest-page fault,
@@ -4457,7 +5102,10 @@ def _h_guest_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[
     """checktag in VS-mode with two-stage translation and with the G stage only, and loads and stores: with two-stage
     translation tag checked in a VS-stage PTE.MTAG page only, also HLV and HSV, and not from a VS-stage tagcheck-exempt
     code page; with MPRV, MPV = 1 and MPP = U tag checked in a VS-stage user PTE.MTAG page; tag checked with the G stage
-    only, and with 4-bit tags a G-stage leaf PTE with PTE.MTAG, which is reserved there."""
+    only, and with 4-bit tags a G-stage leaf PTE with PTE.MTAG, which is reserved there. With two-stage translation,
+    also the protection of the tag storage (Svatag): the loads and settags of VS-mode and VU-mode, HLV and HSV (also in
+    HU-mode) and, through MPRV with MPV = 1, the loads of VS-mode and VU-mode in the VITT ranges of their modes raise
+    access faults, and HLVX none (_h_hlsv_vitt_tests, _h_mprv_vitt_tests)."""
     name = MT_NAMES[mt_mode]
     pte, addr, tmp = test_data.int_regs.get_registers(3)
     regs = (pte, addr, tmp)
@@ -4512,8 +5160,11 @@ def _h_guest_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[
     lines += _h_two_stage_mtag_tests(test_data, cg, mt_mode, regs)
     lines += _h_hlsv_paging_tests(test_data, cg, mt_mode, regs)
     lines += _h_vs_code_tests(test_data, cg, mt_mode, regs)
+    lines += _h_hlsv_vitt_tests(test_data, mt_mode, regs)
     lines += gated(_h_mprv_vu_paging_tests(test_data, mt_mode, regs), STANDARD_SM_GATE)
+    lines += gated(_h_mprv_vitt_tests(test_data, mt_mode, regs), STANDARD_SM_GATE)
     lines += [*guest_translation_teardown(test_data), *guest_translation_setup(test_data, SV39X4, None, "VSmode")]
+    g_stage = []
     for case, g_flags in H_CHECKTAG_G_STAGE_CASES:
         setup = [
             *create_page_mapping(
@@ -4526,13 +5177,15 @@ def _h_guest_checktag_tests(test_data: TestData, cg: str, mt_mode: int) -> list[
             ),
             "hfence.gvma",
         ]
-        lines += _h_guest_checktag_case(
+        g_stage += _h_guest_checktag_case(
             test_data, cg, mt_mode, case, "cp_checktag_g_stage", int(SV39X4.data_va, 16), setup
         )
-    lines += _h_guest_checktag_case(
+    g_stage += _h_guest_checktag_case(
         test_data, cg, mt_mode, "g_stage_gpa_too_wide", "cp_checktag_g_stage", H_GPA_TOO_WIDE, []
     )
-    lines += _h_g_stage_checked_tests(test_data, cg, mt_mode, regs)
+    g_stage += _h_g_stage_checked_tests(test_data, cg, mt_mode, regs)
+    # The G stage only: VS-mode's first-stage translation is Bare
+    lines += gated(g_stage, NO_BARE_VITT_RANGE)
     if mt_mode == MT_TAG4:
         lines += _h_g_stage_mtag_tests(test_data, cg, regs)
     lines += [
@@ -4582,7 +5235,7 @@ def make_zimt_sm(test_data: TestData) -> list[TestChunk]:
     chunks.append(test_data.end_test_chunk())
 
     tc = test_data.begin_test_chunk("Sm_mt")
-    tc.code.extend(_m_mt_tests(test_data, cg))
+    tc.code.extend(gated(_m_mt_tests(test_data, cg), NO_M_VITT_RANGE))
     chunks.append(test_data.end_test_chunk())
     return chunks
 
@@ -4615,15 +5268,17 @@ def make_zimt_s(test_data: TestData) -> list[TestChunk]:
     # S-mode uses menvcfg.MT_MODE and menvmtagexclude, which it sets through T-SBI. The M-mode exclusion mask and the
     # U-mode MT_MODE and mask hold other values; mseccfg.MT_MODE stays 00 for the M-mode trap handler.
     tc = test_data.begin_test_chunk("S_mt")
+    lines = []
     val, tmp = test_data.int_regs.get_registers(2)
     for mt_mode, other in MT_ITERATIONS:
         iteration = _via_tsbi(_configure([("menvcfg", mt_mode), ("senvcfg", other)], ["m", "menv", "senv"], val, tmp))
         test_data.int_regs.return_registers([val, tmp])
         iteration += _mt_mode_tests(test_data, cg, "S", mt_mode, ENV_TAG["menv"])
-        tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
+        lines += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
         val, tmp = test_data.int_regs.get_registers(2)
-    tc.code += _via_tsbi(_restore(["menvcfg", "senvcfg"], ["m", "menv", "senv"], val, tmp))
+    lines += _via_tsbi(_restore(["menvcfg", "senvcfg"], ["m", "menv", "senv"], val, tmp))
     test_data.int_regs.return_registers([val, tmp])
+    tc.code += gated(lines, NO_BARE_VITT_RANGE)
     chunks.append(test_data.end_test_chunk())
     return chunks
 
@@ -4660,6 +5315,7 @@ def make_zimt_u_mt(test_data: TestData) -> list[TestChunk]:
     """
     cg = "Zimt_U_cg"
     tc = test_data.begin_test_chunk("U_mt")
+    lines = []
     val, tmp = test_data.int_regs.get_registers(2)
     for mt_mode, _ in MT_ITERATIONS:
         iteration = [
@@ -4669,14 +5325,15 @@ def make_zimt_u_mt(test_data: TestData) -> list[TestChunk]:
         ]
         test_data.int_regs.return_registers([val, tmp])
         iteration += _mt_mode_tests(test_data, cg, "U", mt_mode, ENV_TAG["senv"])
-        tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
+        lines += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
         val, tmp = test_data.int_regs.get_registers(2)
-    tc.code += [
+    lines += [
         "RVTEST_TSBI_GOTO_SMODE",
         *_restore(["senvcfg"], ["senv"], val, tmp),
         "RVTEST_TSBI_GOTO_UMODE",
     ]
     test_data.int_regs.return_registers([val, tmp])
+    tc.code += gated(lines, NO_BARE_VITT_RANGE)
     return [test_data.end_test_chunk()]
 
 
@@ -4721,6 +5378,7 @@ def make_zimt_h(test_data: TestData) -> list[TestChunk]:
     # sets. In VS-mode, senvcfg and senvmtagexclude hold other values. In VU-mode, henvcfg.MT_MODE stays 00 for the
     # VS-mode trap handler, which serves the VU-mode T-SBI calls, and henvmtagexclude holds another value.
     tc = test_data.begin_test_chunk("H_mt")
+    lines = []
     val, tmp = test_data.int_regs.get_registers(2)
     for mode in ("VS", "VU"):
         for mt_mode, other in MT_ITERATIONS:
@@ -4733,9 +5391,10 @@ def make_zimt_h(test_data: TestData) -> list[TestChunk]:
             iteration += _mt_mode_tests(test_data, cg, mode, mt_mode, ENV_TAG["henv" if mode == "VS" else "senv"])
             val, tmp = test_data.int_regs.get_registers(2)
             iteration += ["RVTEST_TSBI_GOTO_SMODE", *_restore(["henvcfg", "senvcfg"], [], val, tmp)]
-            tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
-    tc.code += _restore([], ["senv", "henv"], val, tmp)
+            lines += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
+    lines += _restore([], ["senv", "henv"], val, tmp)
     test_data.int_regs.return_registers([val, tmp])
+    tc.code += gated(lines, NO_BARE_VITT_RANGE)
     chunks.append(test_data.end_test_chunk())
     return chunks
 
@@ -4757,7 +5416,7 @@ def make_zimt_sm_settag(test_data: TestData) -> list[TestChunk]:
     cg = "Zimt_Sm_cg"
     tc = test_data.begin_test_chunk("Sm_settag")
     val, tmp = test_data.int_regs.get_registers(2)
-    tc.code += [
+    lines = [
         comment_banner("settag in M-mode", "mvitt = the tag table, and pointer masking in M-mode"),
         f"LA(x{val}, {TAG_TABLE})",
         f"csrw CSR_MVITT, x{val}",
@@ -4771,14 +5430,15 @@ def make_zimt_sm_settag(test_data: TestData) -> list[TestChunk]:
             iteration += _settag_rs1_tests(test_data, cg)
         iteration += _sm_zero_extended_tests(test_data, cg, mt_mode)
         iteration += gated(_sm_mprv_tests(test_data, cg, mt_mode), SM_MPRV_GATE)
-        tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
+        lines += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
     val, tmp = test_data.int_regs.get_registers(2)
-    tc.code += [
+    lines += [
         comment_banner("Restore", "mseccfg.PMM = 00 and mvitt = 0"),
         *_write_field("mseccfg", PMM_LSB, 0, val, tmp),
         "csrw CSR_MVITT, x0",
     ]
     test_data.int_regs.return_registers([val, tmp])
+    tc.code += gated(lines, NO_M_VITT_RANGE)
     tc.raw_data += _tag_table_data()
     return [test_data.end_test_chunk()]
 
@@ -4897,7 +5557,7 @@ def make_zimt_u_settag(test_data: TestData) -> list[TestChunk]:
             "RVTEST_TSBI_GOTO_UMODE",
         ]
         test_data.int_regs.return_registers([base, val, tmp])
-        tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
+        tc.code += gated(_tag7(iteration) if mt_mode == MT_TAG7 else iteration, NO_BARE_VITT_RANGE)
     tc.raw_data += _tag_table_data()
     return [test_data.end_test_chunk()]
 
@@ -4975,6 +5635,7 @@ def make_zimt_h_settag(test_data: TestData) -> list[TestChunk]:
             *_record_tags(test_data, base, val, window),
         ]
         test_data.int_regs.return_registers([base, val, tmp])
+        iteration = gated(iteration, NO_BARE_VITT_RANGE)
         iteration += gated(_h_guest_settag_tests(test_data, cg, mt_mode), "defined(SV39_SUPPORTED)")
         tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
     tc.raw_data += [*_tag_table_data(), *guest_table_data()]
@@ -5325,20 +5986,30 @@ def make_zimt_sm_checktag(test_data: TestData) -> list[TestChunk]:
         iteration += _checktag_sweep_tests(test_data, cg, mt_mode)
         mt = test_data.int_regs.get_register()
         mt_lines = ([f"csrs mseccfg, x{mt}"], [f"csrc mseccfg, x{mt}"])
-        iteration += [
-            f"LI(x{mt}, {mt_mode << MT_MODE_LSB:#x})",
-            *_checked_access_tests(test_data, cg, "M", mt_mode, (*INT_ACCESSES, *FP_ACCESSES), False, mt_lines),
-            *gated(_two_chunk_tests(test_data, cg, "M", mt_mode, False, mt_lines), MISALIGNED_LDST_GATE),
-            *_sp_base_tests(test_data, cg, "M", mt_mode, mt_lines),
-            *_order_tests(test_data, cg, "M", mt_mode, False, mt_lines),
-            *_unchecked_access_tests(test_data, cg, "M", mt_mode, mt_lines, m_mode=True),
-            *_checked_regular_tests(test_data, cg, "M", mt_mode, False, mt_lines, m_mode=True),
-            *_checktag_sp_tests(test_data, cg, "M", mt_mode, False, mt_lines),
-        ]
+        iteration += gated(
+            [
+                f"LI(x{mt}, {mt_mode << MT_MODE_LSB:#x})",
+                *_checked_access_tests(test_data, cg, "M", mt_mode, (*INT_ACCESSES, *FP_ACCESSES), False, mt_lines),
+                *gated(_two_chunk_tests(test_data, cg, "M", mt_mode, False, mt_lines), MISALIGNED_LDST_GATE),
+                *_sp_base_tests(test_data, cg, "M", mt_mode, mt_lines),
+                *_order_tests(test_data, cg, "M", mt_mode, False, mt_lines),
+                *_unchecked_access_tests(test_data, cg, "M", mt_mode, mt_lines, m_mode=True),
+                *_checked_regular_tests(test_data, cg, "M", mt_mode, False, mt_lines, m_mode=True),
+                *_checktag_sp_tests(test_data, cg, "M", mt_mode, False, mt_lines),
+            ],
+            NO_M_VITT_RANGE,
+        )
         test_data.int_regs.return_register(mt)
-        iteration += gated(_m_checked_mprv_tests(test_data, cg, mt_mode), SM_MPRV_GATE)
-        iteration += gated(_m_checked_mprv_regular_tests(test_data, cg, mt_mode), SM_MPRV_GATE)
-        iteration += gated(_m_checked_mprv_v_tests(test_data, cg, mt_mode), SM_MPRV_V_GATE)
+        # With MPRV, the effective mode's translation is Bare; _m_checked_mprv_tests also enables memory tagging in
+        # M-mode around loads and stores
+        iteration += gated(
+            gated(_m_checked_mprv_tests(test_data, cg, mt_mode), f"({NO_M_VITT_RANGE}) && ({NO_BARE_VITT_RANGE})"),
+            SM_MPRV_GATE,
+        )
+        iteration += gated(
+            gated(_m_checked_mprv_regular_tests(test_data, cg, mt_mode), NO_BARE_VITT_RANGE), SM_MPRV_GATE
+        )
+        iteration += gated(gated(_m_checked_mprv_v_tests(test_data, cg, mt_mode), NO_BARE_VITT_RANGE), SM_MPRV_V_GATE)
         tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
     val, tmp = test_data.int_regs.get_registers(2)
     tc.code += [
@@ -5364,6 +6035,9 @@ def make_zimt_s_checktag(test_data: TestData) -> list[TestChunk]:
     not tag checked, and the PTE.MTAG tests: tagged-data pages, pages with PTE.MTAG that are not (X = 1, or user pages
     for S-mode), loads and stores over two pages (also into an unmapped page), tagcheck-exempt code pages (also
     execute-only), PTE.MTAG in a non-leaf PTE and with memory tagging disabled, and U-mode's loads through MPRV in M-mode.
+    Last, the protection of the tag storage (Svatag), with Sv39: the regular accesses and settags of S-mode in its VITT
+    range, at its edges, and of U-mode, through MPRV in M-mode and in U-mode itself, raise access faults
+    (_s_vitt_tests).
 
     With Bare translation and memory tagging enabled in S-mode (menvcfg), the tests raise no exception, as in M-mode:
     the trap handler of S-mode would be tag checked, and so would the read of the trapping instruction by the trap
@@ -5411,6 +6085,7 @@ def make_zimt_s_checktag(test_data: TestData) -> list[TestChunk]:
             "csrw CSR_SVITTS, x0",
         ]
         test_data.int_regs.return_register(val)
+        iteration = gated(iteration, NO_BARE_VITT_RANGE)
         tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
     a, b, c = test_data.int_regs.get_registers(3)
     regs = (a, b, c)
@@ -5444,6 +6119,8 @@ def make_zimt_s_checktag(test_data: TestData) -> list[TestChunk]:
     tc.code += _mtag_mapping(test_data)
     tc.code += _s_mtag_tests(test_data, cg, MT_TAG4, code)
     tc.code += _tag7(_s_mtag_tests(test_data, cg, MT_TAG7, code))
+    tc.code += _s_vitt_tests(test_data, cg, MT_TAG4, code)
+    tc.code += _tag7(_s_vitt_tests(test_data, cg, MT_TAG7, code))
     test_data.int_regs.return_registers(list(code))
     tc.code += [
         comment_banner("Restore", "satp = 0 and svitts = 0"),
@@ -5501,7 +6178,7 @@ def make_zimt_u_checktag(test_data: TestData) -> list[TestChunk]:
             "RVTEST_TSBI_GOTO_UMODE",
         ]
         test_data.int_regs.return_register(val)
-        tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
+        tc.code += gated(_tag7(iteration) if mt_mode == MT_TAG7 else iteration, NO_BARE_VITT_RANGE)
     tc.raw_data += [*_tag_table_data(), *_check_data()]
     return [test_data.end_test_chunk()]
 
@@ -5525,7 +6202,10 @@ def make_zimt_h_checktag(test_data: TestData) -> list[TestChunk]:
     HS-mode and hstatus.VUMT_MODE in HU-mode; not with hstatus.MTAG_I = 1, and HLVX never. Then, with Sv39, VS-mode
     checktags with guest translation, whose page faults and guest-page faults HS-mode takes, loads and stores of a page
     whose VS-stage leaf PTE has PTE.MTAG or not, also HLV and HSV and from VS-stage code pages with PTE.MTAG or not,
-    VU-mode's through MPRV in M-mode, and of a page whose G-stage leaf PTE has it, which is reserved there.
+    VU-mode's through MPRV in M-mode, and of a page whose G-stage leaf PTE has it, which is reserved there; and the
+    protection of the tag storage (Svatag) with two-stage translation: the regular accesses and settags of VS-mode and
+    VU-mode, HLV and HSV (also in HU-mode) and the loads of VS-mode and VU-mode through MPRV in the VITT ranges of their
+    modes raise access faults, and HLVX none.
     """
     _check_sig_reg(test_data)
     cg = "Zimt_H_cg"
@@ -5564,6 +6244,7 @@ def make_zimt_h_checktag(test_data: TestData) -> list[TestChunk]:
             ]
             test_data.int_regs.return_register(val)
         iteration += _h_hlsv_tests(test_data, cg, mt_mode)
+        iteration = gated(iteration, NO_BARE_VITT_RANGE)
         iteration += gated(_h_guest_checktag_tests(test_data, cg, mt_mode), "defined(SV39_SUPPORTED)")
         tc.code += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
     tc.raw_data += [*_tag_table_data(), *_check_data(), *guest_table_data()]

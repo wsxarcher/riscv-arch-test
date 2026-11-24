@@ -28,4 +28,21 @@ normative_rule_definitions:
   # HSV tests use the table of the selected guest mode, and in cp_hlsv_checked that of the other one holds the opposite
   # tag.
   - name: svatag_vitt_hlsv
-    coverpoint: ["Zimt_H_cg/{cp_hlsv_checked, cp_hlsv_paged}"]
+    coverpoint:
+      [
+        "Zimt_H_cg/{cp_hlsv_checked, cp_hlsv_paged, cp_vitt_hlsv, cp_vitt_hlsv_hu}",
+      ]
+
+  # With first-stage paging and memory tagging enabled, a regular access whose virtual addresses span the VITT range of
+  # the effective privilege mode, mc_tag_va of its lowest to its highest virtual address, raises an access fault, and so
+  # does a settag whose chunks overlap it. The tests take M-mode and Bare translation, whose range the specification
+  # leaves implementation-defined, as having none, only for a config that declares it (SMVATAG_NO_M_MODE_VITT_RANGE,
+  # SVATAG_NO_BARE_VITT_RANGE).
+  - name: svatag_vitt_protection
+    coverpoint:
+      [
+        "Zimt_S_cg/{cp_vitt, cp_vitt_settag_16, cp_vitt_mt_disabled, cp_vitt_gva}",
+        "Zimt_Sm_cg/{cp_vitt_mprv_u, cp_vitt_mprv_v, cp_vitt_mtag_i, cp_vitt_mprv_u_gva, cp_vitt_mprv_v_gva}",
+        "Zimt_U_cg/{cp_vitt_u, cp_vitt_u_gva}",
+        "Zimt_H_cg/{cp_vitt_hlsv, cp_vitt_hlsv_hu, cp_vitt_hlvx, cp_vitt_v, cp_vitt_hlsv_gva, cp_vitt_hlsv_hu_gva, cp_vitt_v_gva}",
+      ]

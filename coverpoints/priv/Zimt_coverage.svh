@@ -8,14 +8,32 @@
 // AMOs, cbo.zero and vector loads and stores), with Bare translation, with first-stage paging (PTE.MTAG: tagged-data
 // pages, user pages, accesses over two pages and tagcheck-exempt code pages, also of VS-mode and through MPRV of
 // U-mode and VU-mode), with mstatus.MPRV and MTAG_I, with hstatus.MTAG_I, and of HLV and HSV (hstatus.MTAG_I,
-// two-stage translation, GVA); the MT_MODE fields, the MTAG_I bits and the tag generation exclusion mask CSRs; and
-// the software-check exception (cause 18) in the delegation and cause CSRs.
+// two-stage translation, GVA); the protection of the tag storage (Svatag: the access faults of the regular accesses
+// and settags in the VITT range of their mode, at its edges, in S-mode, U-mode, VS-mode and VU-mode, through MPRV, of
+// HLV and HSV, also in HU-mode, and none of HLVX or with memory tagging disabled); the MT_MODE fields, the MTAG_I bits
+// and the tag generation exclusion mask CSRs; and the software-check exception (cause 18) in the delegation and cause
+// CSRs.
 //
 // SPDX-License-Identifier: Apache-2.0
 //
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 `define COVER_ZIMT
+
+// The VITT ranges of M-mode (Smvatag) and of a mode with Bare first-stage address translation (Svatag) are
+// implementation-defined. The tests whose loads, stores or settags run with memory tagging enabled there take them as
+// empty, and they and the bins that only they cover exist only without the extension or for a config that declares
+// the range empty (SMVATAG_NO_M_MODE_VITT_RANGE, SVATAG_NO_BARE_VITT_RANGE in its experimental_params)
+`ifndef SMVATAG_SUPPORTED
+    `define ZIMT_NO_M_VITT_RANGE
+`elsif UDB_SMVATAG_NO_M_MODE_VITT_RANGE
+    `define ZIMT_NO_M_VITT_RANGE
+`endif
+`ifndef SVATAG_SUPPORTED
+    `define ZIMT_NO_BARE_VITT_RANGE
+`elsif UDB_SVATAG_NO_BARE_VITT_RANGE
+    `define ZIMT_NO_BARE_VITT_RANGE
+`endif
 
 // xMT_MODE of the mode the instruction executes in: MT_MODE (bits 35:34) of mseccfg (M), menvcfg (S/HS),
 // henvcfg (VS) or senvcfg (U and VU)
@@ -529,6 +547,167 @@ function automatic bit zimt_trap_hstatus_mtag_i(ins_t ins);
     return 1'(get_csr_val(ins.hart, ins.issue, `SAMPLE_AFTER, CSR_HSTATUS) >> 10);
 endfunction
 
+// The xtval of the trap that the instruction raised, from the mode that took it (as zimt_exception)
+function automatic logic [63:0] zimt_trap_tval(ins_t ins);
+    logic [11:0] tval_csr;
+    if (ins.current.csr_wb[CSR_VSCAUSE])     tval_csr = CSR_VSTVAL;
+    else if (ins.current.csr_wb[CSR_SCAUSE]) tval_csr = CSR_STVAL;
+    else                                     tval_csr = CSR_MTVAL;
+    return 64'(get_csr_val(ins.hart, ins.issue, `SAMPLE_AFTER, tval_csr));
+endfunction
+
+// The privilege mode {V, mode} whose VITT range protects an instruction: the effective privilege mode of a load or store
+// (HLV and HSV, and HLVX, which it does not protect: their guest mode, with hstatus.SPVP; M-mode with mstatus.MPRV = 1:
+// MPP and MPV), or the privilege mode of a settag
+function automatic logic [2:0] zimt_vitt_mode(ins_t ins);
+    logic [XLEN-1:0] mstatus = get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATUS);
+    if (zimt_hlsv(ins) != 3'd0) return {2'b10, zimt_spvp(ins)};
+    if ((ins.prev.mode == 2'b11) && mstatus[17] && !zimt_is_settag(ins))
+        return {mstatus[39] && (mstatus[12:11] != 2'b11), mstatus[12:11]};
+    return {ins.prev.mode_virt, ins.prev.mode};
+endfunction
+
+// Protection of tag storage (Svatag). The VITT range of the mode of an instruction (zimt_vitt_mode), with Sv39
+// translation and memory tagging enabled for it (HLV and HSV: zimt_hlsv_mt_mode): {1, 8-bit tags, its first byte}. It
+// holds the tags of the mode's virtual addresses: from svittu (vsvittu) for U-mode (VU-mode), and svitts (vsvitts) +
+// (2^64 - 2^38) >> 5 with 4-bit tags or >> 4 with 8-bit tags for S-mode (VS-mode), 2^33 or 2^34 bytes. 0 without one:
+// M-mode, Bare translation (implementation-defined bounds), or memory tagging disabled. With disabled, instead the
+// range that 4-bit tags would give with memory tagging disabled in the mode, which protects nothing, and 0 with it
+// enabled.
+function automatic logic [65:0] zimt_vitt_range_of(ins_t ins, logic disabled);
+    logic [2:0]  vmode = zimt_vitt_mode(ins);
+    logic [1:0]  mode  = vmode[1:0];
+    logic        virt  = vmode[2];
+    logic [1:0]  mt;
+    logic [63:0] base;
+    if ((mode == 2'b11) || (zimt_atp_mode(ins, virt ? CSR_VSATP : CSR_SATP) != 4'd8)) return '0;
+    if (zimt_hlsv(ins) != 3'd0) mt = zimt_hlsv_mt_mode(ins);
+    else mt = 2'(get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE,
+                             (mode == 2'b00) ? CSR_SENVCFG : (virt ? CSR_HENVCFG : CSR_MENVCFG)) >> 34);
+    if (disabled) begin
+        if (mt[1]) return '0;
+        mt = 2'b10;
+    end
+    if (!mt[1]) return '0;
+    base = 64'(get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE,
+                           (virt ? 12'h6C2 : 12'h5C2) | {11'b0, mode == 2'b00}));
+    if (mode != 2'b00) base = base + (mt[0] ? 64'h0FFF_FFFC_0000_0000 : 64'h07FF_FFFE_0000_0000);
+    return {1'b1, mt[0], base};
+endfunction
+
+function automatic logic [65:0] zimt_vitt_range(ins_t ins);
+    return zimt_vitt_range_of(ins, 1'b0);
+endfunction
+
+// An address of an instruction with a VITT range (zimt_vitt_range) as pointer masking transforms it: the pointer
+// masking of its mode (zimt_vitt_mode; PMM of senvcfg for U-mode and VU-mode, menvcfg for S-mode, henvcfg for
+// VS-mode, and hstatus.HUPMM for HLV and HSV in HU-mode) ignores its upper PMLEN bits (7 with PMM = 10, 16 with 11),
+// which address translation sign-extends
+function automatic logic [63:0] zimt_vitt_masked(ins_t ins, logic [63:0] addr);
+    logic [2:0] vmode = zimt_vitt_mode(ins);
+    logic [1:0] pmm;
+    if (zimt_hlsv(ins) == 3'd4) return addr;  // HLVX, which pointer masking does not apply to
+    if ((zimt_hlsv(ins) inside {3'd1, 3'd2, 3'd3}) && !vmode[0] && (ins.prev.mode == 2'b00))
+        pmm = zimt_hstatus(ins)[49:48];
+    else
+        pmm = 2'(get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE,
+                             (vmode[1:0] == 2'b00) ? CSR_SENVCFG : (vmode[2] ? CSR_HENVCFG : CSR_MENVCFG)) >> 32);
+    case (pmm)
+        2'b10:   return {{7{addr[56]}}, addr[56:0]};
+        2'b11:   return {{16{addr[47]}}, addr[47:0]};
+        default: return addr;
+    endcase
+endfunction
+
+// The page of byte address addr in a VITT range (zimt_vitt_range): 1 its first page, 2 its last page, 3 another of its
+// pages, 4 the page before it, 5 the page after it; 0 otherwise
+function automatic logic [2:0] zimt_vitt_page(logic [65:0] range, logic [63:0] addr);
+    logic [63:0] offset = addr - range[63:0];
+    logic [63:0] size   = range[64] ? 64'h4_0000_0000 : 64'h2_0000_0000;
+    if (!range[65])                          return 3'd0;
+    if (offset < 64'h1000)                   return 3'd1;
+    if (offset < size - 64'h1000)            return 3'd3;
+    if (offset < size)                       return 3'd2;
+    if (offset >= 64'hFFFF_FFFF_FFFF_F000)   return 3'd4;
+    if (offset - size < 64'h1000)            return 3'd5;
+    return 3'd0;
+endfunction
+
+// The instructions of the protection of tag storage tests (Zimt.py _s_vitt_tests, _h_mprv_vitt_tests): 1 ld (12 with
+// sp as the base register), 2 sd, 3 lr.d, 4 sc.d, 5 amoadd.d, 6 cbo.zero, 7 settag, 8 vle64.v, 9 vse64.v, 10 hlv.d,
+// 11 hsv.d, 13 hlvx.wu (not a regular access); 0 for any other instruction
+function automatic logic [3:0] zimt_vitt_kind(ins_t ins);
+    logic [31:0] insn = ins.current.insn;
+    if ((insn ==? LD) && (insn[19:15] == 5'd2)) return 4'd12;
+    if (insn ==? LD)         return 4'd1;
+    if (insn ==? SD)         return 4'd2;
+    if (insn ==? LR_D)       return 4'd3;
+    if (insn ==? SC_D)       return 4'd4;
+    if (insn ==? AMOADD_D)   return 4'd5;
+    if (insn ==? CBO_ZERO)   return 4'd6;
+    if (zimt_is_settag(ins)) return 4'd7;
+    if (insn ==? VLE64_V)    return 4'd8;
+    if (insn ==? VSE64_V)    return 4'd9;
+    if (insn ==? HLV_D)      return 4'd10;
+    if (insn ==? HSV_D)      return 4'd11;
+    if (insn ==? HLVX_WU)    return 4'd13;
+    return 4'd0;
+endfunction
+
+// An instruction of zimt_vitt_kind in the VITT range of its mode (zimt_vitt_range): {its kind, the page of its bytes
+// (zimt_vitt_page; 6 from the page before the range into its first page, 7 from its last page into the page after
+// it), its outcome}. Its bytes: 8 from its address (that of rs1, plus the offset of ld and sd, as pointer masking
+// transforms it, zimt_vitt_masked; element 0 of vle64.v and vse64.v), the cache block of cbo.zero, the chunks of
+// settag. Its outcome: 1 the access fault of its kind (a load access fault for ld, lr.d, vle64.v and hlv.d, a
+// store/AMO access fault for the others) with the address of its first byte in the range (the masked rs1 for cbo.zero
+// and settag), 2 a page fault with its address, 3 the exception of its tag check (a page fault with another address,
+// of a tag access, or a software-check exception), 0 none. 0 for another instruction or outcome, or without a VITT
+// range.
+function automatic logic [8:0] zimt_vitt_of(ins_t ins, logic disabled);
+    logic [3:0]  kind  = zimt_vitt_kind(ins);
+    logic [65:0] range = zimt_vitt_range_of(ins, disabled);
+    logic [31:0] insn  = ins.current.insn;
+    logic [7:0]  exc   = zimt_exception(ins);
+    logic [63:0] rs1, first, last, reported, tval;
+    logic [2:0]  page, first_page, last_page;
+    logic [1:0]  outcome;
+    if ((kind == 4'd0) || !range[65]) return 9'h000;
+    rs1 = zimt_vitt_masked(ins, ins.current.rs1_val);
+    case (kind)
+        4'd1, 4'd12: first = zimt_vitt_masked(ins, ins.current.rs1_val + {{52{insn[31]}}, insn[31:20]});
+        4'd2:        first = zimt_vitt_masked(ins, ins.current.rs1_val + {{52{insn[31]}}, insn[31:25], insn[11:7]});
+        4'd6:        first = rs1 & ~64'h3F;
+        4'd7:        first = rs1 & ~64'hF;
+        default:     first = rs1;
+    endcase
+    last = first + ((kind == 4'd6) ? 64'd63 : (kind == 4'd7) ? {56'd0, insn[23:20], 4'hF} : 64'd7);
+    first_page = zimt_vitt_page(range, first);
+    last_page  = zimt_vitt_page(range, last);
+    if (first_page == last_page)                        page = first_page;
+    else if ((first_page == 3'd4) && (last_page == 3'd1)) page = 3'd6;
+    else if ((first_page == 3'd2) && (last_page == 3'd5)) page = 3'd7;
+    else                                                return 9'h000;
+    if (page == 3'd0) return 9'h000;
+    reported = (kind inside {4'd6, 4'd7}) ? rs1 : (page == 3'd6) ? range[63:0] : first;
+    tval     = zimt_trap_tval(ins);
+    if (exc == 8'h00)                                                                   outcome = 2'd0;
+    else if ((exc == ((kind inside {4'd1, 4'd3, 4'd8, 4'd10, 4'd12}) ? 8'h45 : 8'h47)) && (tval == reported))
+                                                                                        outcome = 2'd1;
+    else if ((exc inside {8'h4D, 8'h4F}) && (tval == first))                           outcome = 2'd2;
+    else if (exc inside {8'h4D, 8'h4F, 8'h52})                                         outcome = 2'd3;
+    else                                                                                return 9'h000;
+    return {kind, page, outcome};
+endfunction
+
+function automatic logic [8:0] zimt_vitt(ins_t ins);
+    return zimt_vitt_of(ins, 1'b0);
+endfunction
+
+// zimt_vitt with memory tagging disabled in the mode, in the range that 4-bit tags would give (cp_vitt_mt_disabled)
+function automatic logic [8:0] zimt_vitt_mt_disabled(ins_t ins);
+    return zimt_vitt_of(ins, 1'b1);
+endfunction
+
 // Sm tests are not part of a certificate without Sm (EXCLUDE_SM), so neither is their covergroup
 `ifndef EXCLUDE_SM
 covergroup Zimt_Sm_cg with function sample(ins_t ins);
@@ -594,7 +773,8 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
     cp_mtag_i_view:        cross priv_mode_m, csrr, sstatus_csr, mtag_i_m_set;
 `endif
 
-    // Memory tagging enabled (mseccfg.MT_MODE = 10, or 11 with 7-bit tags)
+    // Memory tagging enabled (mseccfg.MT_MODE = 10, or 11 with 7-bit tags), with no VITT range in M-mode
+`ifdef ZIMT_NO_M_VITT_RANGE
 `ifdef UDB_ZIMT_POINTER_TAG_WIDTH_7
     // gentag with 4-bit tags, with the exclusion mask bits above 15, which it ignores, all clear or not. Only with
     // 7-bit tags must a hart keep those bits.
@@ -625,9 +805,11 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
     cp_addtag_mt_tag7_rd_rs1:      cross priv_mode_m, mt_tag7, addtag_rd_rs1;
     cp_mop_rr_not_zimt_mt_tag7:    cross priv_mode_m, mt_tag7, mop_rr_not_zimt;
 `endif
+`endif
     // settag with the tag table mvitt and pointer masking (mseccfg.PMM)
 `ifdef SMVATAG_SUPPORTED
 `ifdef SMMPM_SUPPORTED
+`ifdef ZIMT_NO_M_VITT_RANGE
     cp_settag_mt_tag4_chunks:      cross priv_mode_m, mt_tag4, settag_chunk4, settag_imm;
     cp_settag_mt_tag4_rs1:         cross priv_mode_m, mt_tag4, settag_rs1;
 `ifdef UDB_ZIMT_POINTER_TAG_WIDTH_7
@@ -642,6 +824,7 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
 `endif
 `endif
 `endif
+`endif
     // checktag and the implicit tag checks of loads and stores, which raise no exception with memory tagging enabled
     // in M-mode, where its trap handler runs: checktag of chunks with the matching tags, between chunks with a
     // mismatching one, and each kind of load and store
@@ -649,6 +832,7 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
 `ifdef UDB_ZIMT_POINTER_TAG_WIDTH_7
     cp_checktag_mt_tag7_chunks:    cross priv_mode_m, mt_tag7, checktag_chunk7, checktag_imm;
 `endif
+`ifdef ZIMT_NO_M_VITT_RANGE
     cp_checked_access:             cross priv_mode_m, mt_enabled, checked_access;
 `ifdef UDB_MISALIGNED_LDST
     cp_checked_two_chunks:         cross priv_mode_m, mt_enabled, checked_load_store, checked_two_chunks;
@@ -665,17 +849,22 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
     cp_checked_regular:            cross priv_mode_m, mt_enabled, checked_regular_m;
 `endif
     cp_checktag_sp:                cross priv_mode_m, mt_enabled, checktag_sp;
-    // MPRV with MPP = S: loads and stores are checked with S-mode's MT_MODE and tag table, checktag with M-mode's
+`endif
+    // MPRV with MPP = S: loads and stores are checked with S-mode's MT_MODE and tag table, checktag with M-mode's.
+    // S-mode's translation is Bare, and the tests of cp_checked_mprv to cp_checktag_mprv_m_pmm also enable memory
+    // tagging in M-mode around loads and stores
 `ifdef S_SUPPORTED
 `ifdef SMNPM_SUPPORTED
 `ifdef SVATAG_SUPPORTED
-    cp_checked_mprv:               cross priv_mode_m, checked_mprv_s, mprv_s_mt, checked_load_store, checked_result;
+`ifdef ZIMT_NO_BARE_VITT_RANGE
 `ifdef ZIMT_CHECKED_REGULAR_M
     cp_checked_regular_mprv:       cross priv_mode_m, regular_mprv_s, mprv_s_mt, checked_regular_mprv, checked_regular_result;
 `endif
 `ifdef ZIMT_CHECKED_AMO_LRSC
     cp_checked_regular_misaligned: cross priv_mode_m, regular_mprv_s, mprv_s_mt, regular_misaligned_bare;
 `endif
+`ifdef ZIMT_NO_M_VITT_RANGE
+    cp_checked_mprv:               cross priv_mode_m, checked_mprv_s, mprv_s_mt, checked_load_store, checked_result;
     cp_checked_mprv_m_mt:          cross priv_mode_m, checked_mprv_s, mprv_m_mt, checked_load_store;
     cp_checked_mprv_mtag_i:        cross priv_mode_m, mprv_mtag_i_s, mprv_s_mt, checked_load_store;
     cp_checktag_mprv:              cross priv_mode_m, checktag_mprv_s, mprv_mt;
@@ -683,10 +872,14 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
 `endif
 `endif
 `endif
-    // MPRV with MPV = 1: loads and stores are checked with VS-mode's or VU-mode's MT_MODE and tag table
+`endif
+`endif
+    // MPRV with MPV = 1: loads and stores are checked with VS-mode's or VU-mode's MT_MODE and tag table, with Bare
+    // translation
 `ifdef H_SUPPORTED
 `ifdef SSNPM_SUPPORTED
 `ifdef SVATAG_SUPPORTED
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_checked_mprv_v:             cross priv_mode_m, checked_mprv_v, checked_load_store, checked_result;
     cp_checked_mprv_v_mtag_i:      cross priv_mode_m, mprv_mtag_i_v, mprv_v_mt, checked_load_store;
     cp_checked_mprv_v_gva:         cross priv_mode_m, checked_mprv_v, checked_load_store, swcheck_gva_clear;
@@ -695,14 +888,17 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
 `endif
 `endif
 `endif
+`endif
     // S-mode loads and stores with mstatus.MTAG_I = 1, which only makes the loads and stores of M-mode with MPRV
     // unchecked: a load and a store with a mismatching pointer tag, whose software-check exception M-mode takes
-    // (Zimt_S_checktag, with standard M-mode)
+    // (Zimt_S_checktag, with standard M-mode and Bare translation)
 `ifdef S_SUPPORTED
 `ifdef SVATAG_SUPPORTED
 `ifdef SMNPM_SUPPORTED
 `ifdef SV39_SUPPORTED
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_checked_mtag_i:             cross priv_mode_s, mt_enabled, checked_satp_bare, checked_load_store, mtag_i_checked;
+`endif
 `endif
 `endif
 `endif
@@ -715,6 +911,14 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
 `ifdef SVATAG_SUPPORTED
 `ifdef SV39_SUPPORTED
     cp_checked_mprv_u_page:        cross priv_mode_m, senvcfg_mt, mprv_u_page;
+    // Protection of tag storage (Svatag): loads, and vector loads and stores, with MPRV and MPP = U in and around the
+    // VITT range of U-mode, and a load in it with mstatus.MTAG_I = 1
+    cp_vitt_mprv_u:                cross priv_mode_m, vitt_mprv_u_mode, vitt_width, vitt_mprv_u;
+    cp_vitt_mtag_i:                cross priv_mode_m, vitt_mprv_u_mode, vitt_width, vitt_mtag_i;
+    // ...whose access faults clear mstatus.GVA
+`ifdef H_SUPPORTED
+    cp_vitt_mprv_u_gva:            cross priv_mode_m, vitt_mprv_u_mode, vitt_fault_no_gva;
+`endif
 `endif
 `endif
 `endif
@@ -728,6 +932,11 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
 `ifdef SVATAG_SUPPORTED
 `ifdef SV39_SUPPORTED
     cp_checked_mprv_vu_page:       cross priv_mode_m, senvcfg_mt, mprv_vu_page;
+    // Protection of tag storage (Svatag): loads with MPRV and MPV = 1 in the VITT range of VS-mode and VU-mode, and in
+    // the tagged-data page before it, unchecked with mstatus.MTAG_I
+    cp_vitt_mprv_v:                cross priv_mode_m, vitt_mprv_v_mode, vitt_width, vitt_mprv_v;
+    // ...whose access faults set mstatus.GVA
+    cp_vitt_mprv_v_gva:            cross priv_mode_m, vitt_mprv_v_mode, vitt_fault_gva;
 `endif
 `endif
 `endif
@@ -777,9 +986,11 @@ covergroup Zimt_S_cg with function sample(ins_t ins);
     cp_swcheck_cause:      cross priv_mode_s, csrrw, scause, swcheck_cause;
     cp_csr_access:         cross priv_mode_s, csr_access_op, mtagexclude_csr;
 
-    // Memory tagging enabled (menvcfg.MT_MODE = 10, or 11 with 7-bit tags)
+    // Memory tagging enabled (menvcfg.MT_MODE = 10, or 11 with 7-bit tags), with Bare translation
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_gentag_mt_enabled:  cross priv_mode_s, mt_enabled, gentag;
     cp_addtag_mt_enabled:  cross priv_mode_s, mt_enabled, addtag_wrap;
+`endif
     // settag with Sv39 translation, the tag table svitts and pointer masking (menvcfg.PMM)
 `ifdef SVATAG_SUPPORTED
 `ifdef SMNPM_SUPPORTED
@@ -817,8 +1028,18 @@ covergroup Zimt_S_cg with function sample(ins_t ins);
 `ifdef ZCA_SUPPORTED
     cp_mtag_code_straddle:  cross priv_mode_s, mt_enabled, mtag_code_straddle;
 `endif
+    // Protection of tag storage (Svatag): regular accesses and settag in and around the VITT range of S-mode, settag of
+    // 16 chunks into it, and with memory tagging disabled none
+    cp_vitt:                cross priv_mode_s, mt_enabled, vitt_s;
+    cp_vitt_settag_16:      cross priv_mode_s, mt_enabled, vitt_settag_16;
+    cp_vitt_mt_disabled:    cross priv_mode_s, mt_disabled, vitt_mt_disabled;
+    // ...whose access faults clear hstatus.GVA (mstatus.GVA)
+`ifdef H_SUPPORTED
+    cp_vitt_gva:            cross priv_mode_s, mt_enabled, vitt_fault_no_gva;
+`endif
     // checktag and the implicit tag checks of loads and stores with Bare translation (satp), which raise no
     // exception, as in M-mode: the M-mode trap handler reads the trapping instruction with MPRV and MPP = S
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_checked_access:      cross priv_mode_s, mt_enabled, checked_satp_bare, checked_access;
 `ifdef UDB_MISALIGNED_LDST
     cp_checked_two_chunks:  cross priv_mode_s, mt_enabled, checked_satp_bare, checked_load_store, checked_two_chunks;
@@ -835,6 +1056,7 @@ covergroup Zimt_S_cg with function sample(ins_t ins);
     cp_checked_regular:     cross priv_mode_s, mt_enabled, regular_satp_bare, checked_regular;
 `endif
     cp_checktag_sp:         cross priv_mode_s, mt_enabled, checktag_sp;
+`endif
 `endif
 `endif
 `endif
@@ -863,8 +1085,9 @@ covergroup Zimt_U_cg with function sample(ins_t ins);
     // Access to the exclusion mask CSRs from U-mode
     cp_csr_access:         cross priv_mode_u, csr_access_op, mtagexclude_csr;
 
-    // Memory tagging enabled (senvcfg.MT_MODE = 10, or 11 with 7-bit tags), which needs S-mode
+    // Memory tagging enabled (senvcfg.MT_MODE = 10, or 11 with 7-bit tags), which needs S-mode, with Bare translation
 `ifdef S_SUPPORTED
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_gentag_mt_enabled:  cross priv_mode_u, mt_enabled, gentag;
     cp_addtag_mt_enabled:  cross priv_mode_u, mt_enabled, addtag_wrap;
     // settag with the tag table svittu and pointer masking (senvcfg.PMM)
@@ -889,6 +1112,23 @@ covergroup Zimt_U_cg with function sample(ins_t ins);
     cp_checktag_sp:         cross priv_mode_u, mt_enabled, checktag_sp, checktag_result;
 `ifdef RVMODEL_ACCESS_FAULT_ADDRESS_LOAD
     cp_checked_fault:       cross priv_mode_u, mt_enabled, checked_fault;
+`endif
+`endif
+`endif
+`endif
+`endif
+    // Protection of tag storage (Svatag): in U-mode with Sv39 (Zimt_S_checktag), a load and settag in the first page
+    // of the VITT range of U-mode, whose access faults clear hstatus.GVA
+`ifdef S_SUPPORTED
+`ifdef SVATAG_SUPPORTED
+`ifdef SMNPM_SUPPORTED
+`ifdef SSNPM_SUPPORTED
+`ifdef SV39_SUPPORTED
+    cp_vitt_u:              cross priv_mode_u, mt_enabled, vitt_direct;
+`ifdef H_SUPPORTED
+    cp_vitt_u_gva:          cross priv_mode_u, mt_enabled, vitt_fault_no_gva;
+`endif
+`endif
 `endif
 `endif
 `endif
@@ -950,20 +1190,28 @@ covergroup Zimt_H_cg with function sample(ins_t ins);
     // hstatus.MTAG_I: set and cleared
     cp_mtag_i_write:       cross priv_mode_hs, csrs_csrc, hstatus, mtag_i_h_written;
 
-    // Memory tagging enabled (VS-mode: henvcfg.MT_MODE, VU-mode: senvcfg.MT_MODE = 10, or 11 with 7-bit tags)
+    // Memory tagging enabled (VS-mode: henvcfg.MT_MODE, VU-mode: senvcfg.MT_MODE = 10, or 11 with 7-bit tags), with
+    // Bare vsatp and hgatp
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_gentag_mt_enabled:  cross priv_mode_vs_vu, mt_enabled, gentag;
     cp_addtag_mt_enabled:  cross priv_mode_vs_vu, mt_enabled, addtag_wrap;
+`endif
     // settag with the tag tables vsvitts (VS-mode) and vsvittu (VU-mode), and pointer masking (henvcfg.PMM,
     // senvcfg.PMM)
 `ifdef SVATAG_SUPPORTED
 `ifdef SSNPM_SUPPORTED
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_settag_mt_enabled:  cross priv_mode_vs_vu, mt_enabled, settag;
-    // VS-mode with guest translation: two-stage (vsatp = Sv39, hgatp = Sv39x4) or the G stage only
+`endif
+    // VS-mode with guest translation: two-stage (vsatp = Sv39, hgatp = Sv39x4) or the G stage only (vsatp Bare)
 `ifdef SV39_SUPPORTED
     cp_settag_two_stage:   cross priv_mode_vs, mt_enabled, settag_two_stage_exception;
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_settag_g_stage:     cross priv_mode_vs, mt_enabled, settag_g_stage_exception;
 `endif
+`endif
     // checktag and the implicit tag checks of integer loads and stores, with Bare vsatp and hgatp
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_checktag_mt_enabled: cross priv_mode_vs_vu, mt_enabled, checktag_bare_exception;
     cp_checked_access:      cross priv_mode_vs_vu, mt_enabled, checked_int_access, checked_result;
     cp_checked_two_chunks:  cross priv_mode_vs_vu, mt_enabled, checked_load_store, checked_two_chunks, checked_two_chunk_result;
@@ -995,22 +1243,38 @@ covergroup Zimt_H_cg with function sample(ins_t ins);
     cp_hlsv_vu_field_hu:    cross priv_mode_u, hlsv_vu_hu;
     cp_hlsv_mtag_i:         cross priv_mode_hs, hlsv_mtag_i;
     cp_hlvx:                cross priv_mode_hs, hlvx_checked;
-    // ...and their software-check exception sets hstatus.GVA
+`endif
+    // ...and their software-check exception sets hstatus.GVA (also with two-stage translation)
     cp_hlsv_gva:            cross priv_mode_hs, hlsv_access, hlsv_swcheck_gva;
     // checktag in VS-mode with guest translation; loads and stores, which with two-stage translation (first-stage
     // paging) are tag checked only in a page whose VS-stage leaf PTE has PTE.MTAG, and are with the G stage only;
     // and a G-stage leaf PTE with PTE.MTAG, which is reserved there
 `ifdef SV39_SUPPORTED
     cp_checktag_two_stage:  cross priv_mode_vs, mt_enabled, checktag_two_stage_exception;
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_checktag_g_stage:    cross priv_mode_vs, mt_enabled, checktag_g_stage_exception;
+`endif
     cp_checked_translated:  cross priv_mode_vs, mt_enabled, checked_load_store, checked_vsatp_translated;
     cp_checked_vs_tagged_page: cross priv_mode_vs, mt_enabled, checked_load_store, vs_mtag_page, checked_result;
+`ifdef ZIMT_NO_BARE_VITT_RANGE
     cp_checked_g_stage:     cross priv_mode_vs, mt_enabled, checked_load_store, checked_g_stage_result;
+`endif
     cp_mtag_g_stage:        cross priv_mode_vs, mtag_g_stage_fault;
     // HLV and HSV (hstatus.SPVP = 1) with two-stage translation: checked in a VS-stage tagged-data page, not in a page
     // without PTE.MTAG or a user page; their tag loads take guest translation faults; and VS-stage tagcheck-exempt
     // code pages
     cp_hlsv_paged:          cross priv_mode_hs, hlsv_mt, hlsv_access, hlsv_paged;
+    // Protection of tag storage (Svatag): HLV and HSV in the VITT range of their guest mode, in HS-mode and in HU-mode
+    // (VU-mode with hstatus.VUMT_MODE)
+    cp_vitt_hlsv:           cross priv_mode_hs, vitt_width, hlsv_spvp, vitt_hlsv;
+    cp_vitt_hlsv_hu:        cross priv_mode_u, vitt_width, vitt_hlsv;
+    cp_vitt_hlvx:           cross priv_mode_hs, vitt_width, vitt_hlvx;
+    // ...and the accesses of VS-mode and VU-mode themselves
+    cp_vitt_v:              cross priv_mode_vs_vu, mt_enabled, vitt_direct;
+    // Their access faults set hstatus.GVA
+    cp_vitt_hlsv_gva:       cross priv_mode_hs, hlsv_spvp, vitt_fault_gva;
+    cp_vitt_hlsv_hu_gva:    cross priv_mode_u, vitt_fault_gva;
+    cp_vitt_v_gva:          cross priv_mode_vs_vu, vitt_fault_gva;
     cp_vs_mtag_code_access: cross priv_mode_vs, mt_enabled, checked_load_store, vs_mtag_code_access;
     // A guest-page fault in an implicit access of the VS-stage walk writes the pseudoinstruction to htinst, which
     // deposits the MTAG bit of the code page in hstatus.MTAG_I
