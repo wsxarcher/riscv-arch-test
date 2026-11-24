@@ -9,7 +9,8 @@ ref_model_exe: sail_riscv_sim # executable name on $PATH or full path to executa
 udb_config: sail-rv64-gcbhv-zimt.yaml
 linker_script: link.ld
 dut_include_dir: . # Directory containing DUT specific rvmodel_macros.h header
-# Implemented, but not defined by UDB: listed here instead of in the UDB config
+# Implemented, but not defined by UDB: listed here instead of in the UDB config (Svatag depends on Svukte, which the
+# UDB config implements)
 experimental_extensions: [Zimt, Svatag, Smvatag]
 experimental_params:
   ZIMT_POINTER_TAG_WIDTH_7: true # as in sail.json

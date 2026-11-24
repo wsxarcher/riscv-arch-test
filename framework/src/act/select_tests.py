@@ -15,7 +15,7 @@ from pathlib import Path
 from rich import print as rprint
 
 from act.certificate_tests import get_certificate_extensions
-from act.config import Config, load_config
+from act.config import Config, check_experimental_requirements, load_config
 from act.parse_test_constraints import ExtensionRequirement, TestMetadata
 from act.parse_udb_config import get_config_params, get_implemented_extensions, prepare_dut_outputs
 from act.toolchain import EXPERIMENTAL_EXTENSIONS
@@ -217,6 +217,7 @@ def prepare_configs_and_select_tests(
     for config in configs:
         implemented_extensions = get_implemented_extensions(workdir / config.name / "env" / "extensions.txt")
         implemented_extensions |= config.experimental_extensions
+        check_experimental_requirements(config, implemented_extensions)
         config_params = get_config_params(config.udb_config)
         selected_tests = select_tests(
             full_test_dict,

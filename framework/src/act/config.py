@@ -28,6 +28,12 @@ EXPERIMENTAL_PARAMS: dict[str, str] = {
     "SVATAG_NO_BARE_VITT_RANGE": "Svatag",
 }
 
+# Extensions that an experimental extension depends on, which a config that lists it must implement too
+EXPERIMENTAL_REQUIREMENTS: dict[str, frozenset[str]] = {
+    # "Svatag depends on Svukte extension and thus assumes an even split in address space between user and supervisor"
+    "Svatag": frozenset({"Svukte"}),
+}
+
 
 class RefModelType(str, Enum):
     """Reference model types with their associated flags."""
@@ -233,6 +239,20 @@ def check_compiler_version(config: Config) -> None:
             f"Compiler version mismatch. ACT4 requires {compiler_name} {required_major} or later, but {version_str} was found. "
             "Refer to the ACT4 README for details: https://github.com/riscv/riscv-arch-test/tree/act4?tab=readme-ov-file#3-risc-v-compiler",
         )
+
+
+def check_experimental_requirements(config: Config, implemented_extensions: frozenset[str]) -> None:
+    """Ensure a config implements the extensions that its experimental extensions depend on.
+
+    implemented_extensions holds the extensions of its UDB config and its experimental extensions.
+    """
+    for extension in sorted(config.experimental_extensions):
+        missing = sorted(EXPERIMENTAL_REQUIREMENTS.get(extension, frozenset()) - implemented_extensions)
+        if missing:
+            raise ValueError(
+                f"{config.name}: experimental_extensions lists {extension}, which depends on {', '.join(missing)}, "
+                "but the configuration does not implement it"
+            )
 
 
 def load_config(config_file: Path, *, validate_tools: bool = True) -> Config:

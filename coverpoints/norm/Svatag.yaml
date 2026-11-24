@@ -46,3 +46,16 @@ normative_rule_definitions:
         "Zimt_U_cg/{cp_vitt_u, cp_vitt_u_gva}",
         "Zimt_H_cg/{cp_vitt_hlsv, cp_vitt_hlsv_hu, cp_vitt_hlvx, cp_vitt_v, cp_vitt_hlsv_gva, cp_vitt_hlsv_hu_gva, cp_vitt_v_gva}",
       ]
+
+  # Svatag depends on Svukte and assumes the even split of the address space between user (the lower half) and
+  # supervisor (the upper half) that Svukte enforces. Svukte qualifies the tag accesses of U-mode and VU-mode (also
+  # through MPRV and HLV): with senvcfg.UKTE (hstatus.HUKTE for HLV in HU-mode), a tag table of U-mode or VU-mode in the
+  # upper half raises page faults at the tag address. The framework rejects a config that implements Svatag but not
+  # Svukte.
+  - name: svatag_svukte
+    coverpoint:
+      [
+        "Zimt_U_cg/cp_svukte_tag",
+        "Zimt_Sm_cg/cp_svukte_tag_mprv",
+        "Zimt_H_cg/{cp_svukte_tag_v, cp_svukte_tag_hu, cp_svukte_tag_hs}",
+      ]

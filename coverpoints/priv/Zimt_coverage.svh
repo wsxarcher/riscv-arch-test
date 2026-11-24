@@ -10,7 +10,8 @@
 // U-mode and VU-mode), with mstatus.MPRV and MTAG_I, with hstatus.MTAG_I, and of HLV and HSV (hstatus.MTAG_I,
 // two-stage translation, GVA); the protection of the tag storage (Svatag: the access faults of the regular accesses
 // and settags in the VITT range of their mode, at its edges, in S-mode, U-mode, VS-mode and VU-mode, through MPRV, of
-// HLV and HSV, also in HU-mode, and none of HLVX or with memory tagging disabled); the MT_MODE fields, the MTAG_I bits
+// HLV and HSV, also in HU-mode, and none of HLVX or with memory tagging disabled; with Svukte, which Svatag depends on,
+// the page faults of the tag accesses of U-mode and VU-mode in the upper half); the MT_MODE fields, the MTAG_I bits
 // and the tag generation exclusion mask CSRs; and the software-check exception (cause 18) in the delegation and cause
 // CSRs.
 //
@@ -708,6 +709,44 @@ function automatic logic [8:0] zimt_vitt_mt_disabled(ins_t ins);
     return zimt_vitt_of(ins, 1'b1);
 endfunction
 
+// Svukte, which Svatag depends on: ld, checktag, settag and hlv.d (kind 1, 2, 3 and 4) whose effective privilege mode
+// (zimt_vitt_mode) is U-mode or VU-mode, with Sv39 and memory tagging enabled for it (zimt_hlsv_mt_mode for hlv.d), so
+// that Svukte qualifies their tag accesses: {kind, bit 63 of the address (pointer-masked, zimt_vitt_masked),
+// hstatus.HUKTE (for hlv.d), senvcfg.UKTE, bit 63 of the tag table base of the mode (svittu, vsvittu), outcome}. The
+// outcome: 1 the page fault of the tag access (a load page fault, a store/AMO page fault for settag) at the tag address
+// of the address, the base + (address >> 5) with 4-bit tags and + (address >> 4) with 8-bit ones; 2 a load page fault
+// at the address; 0 none; 3 another one. 0 for another instruction.
+function automatic logic [8:0] zimt_svukte_tag(ins_t ins);
+    logic [31:0]     insn  = ins.current.insn;
+    logic [2:0]      vmode = zimt_vitt_mode(ins);
+    logic [XLEN-1:0] senvcfg;
+    logic [2:0]      kind;
+    logic [1:0]      mt, outcome;
+    logic            hukte;
+    logic [63:0]     addr, base, tag_va, tval;
+    logic [7:0]      exc;
+    if (insn ==? LD)                kind = 3'd1;
+    else if (zimt_is_checktag(ins)) kind = 3'd2;
+    else if (zimt_is_settag(ins))   kind = 3'd3;
+    else if (insn ==? HLV_D)        kind = 3'd4;
+    else                            return 9'h000;
+    if ((vmode[1:0] != 2'b00) || (zimt_atp_mode(ins, vmode[2] ? CSR_VSATP : CSR_SATP) != 4'd8)) return 9'h000;
+    senvcfg = get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_SENVCFG);
+    mt      = (kind == 3'd4) ? zimt_hlsv_mt_mode(ins) : 2'(senvcfg >> 34);
+    if (!mt[1]) return 9'h000;
+    hukte  = (kind == 3'd4) && 1'(zimt_hstatus(ins) >> 24);
+    addr   = zimt_vitt_masked(ins, ins.current.rs1_val + ((kind == 3'd1) ? {{52{insn[31]}}, insn[31:20]} : 64'd0));
+    base   = 64'(get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, vmode[2] ? 12'h6C3 : 12'h5C3));
+    tag_va = base + (mt[0] ? (addr >> 4) : (addr >> 5));
+    exc    = zimt_exception(ins);
+    tval   = zimt_trap_tval(ins);
+    if (exc == 8'h00)                                                    outcome = 2'd0;
+    else if ((exc == ((kind == 3'd3) ? 8'h4F : 8'h4D)) && (tval == tag_va)) outcome = 2'd1;
+    else if ((exc == 8'h4D) && (tval == addr))                          outcome = 2'd2;
+    else                                                                 outcome = 2'd3;
+    return {kind, addr[63], hukte, senvcfg[8], base[63], outcome};
+endfunction
+
 // Sm tests are not part of a certificate without Sm (EXCLUDE_SM), so neither is their covergroup
 `ifndef EXCLUDE_SM
 covergroup Zimt_Sm_cg with function sample(ins_t ins);
@@ -915,6 +954,10 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
     // VITT range of U-mode, and a load in it with mstatus.MTAG_I = 1
     cp_vitt_mprv_u:                cross priv_mode_m, vitt_mprv_u_mode, vitt_width, vitt_mprv_u;
     cp_vitt_mtag_i:                cross priv_mode_m, vitt_mprv_u_mode, vitt_width, vitt_mtag_i;
+    // Svukte, which Svatag depends on, qualifies the tag accesses with MPRV and MPP = U (senvcfg.UKTE)
+`ifdef SVUKTE_SUPPORTED
+    cp_svukte_tag_mprv:            cross priv_mode_m, vitt_mprv_u_mode, vitt_width, svukte_tag_mprv;
+`endif
     // ...whose access faults clear mstatus.GVA
 `ifdef H_SUPPORTED
     cp_vitt_mprv_u_gva:            cross priv_mode_m, vitt_mprv_u_mode, vitt_fault_no_gva;
@@ -1128,6 +1171,10 @@ covergroup Zimt_U_cg with function sample(ins_t ins);
 `ifdef H_SUPPORTED
     cp_vitt_u_gva:          cross priv_mode_u, mt_enabled, vitt_fault_no_gva;
 `endif
+    // Svukte, which Svatag depends on, qualifies the tag accesses of U-mode (senvcfg.UKTE)
+`ifdef SVUKTE_SUPPORTED
+    cp_svukte_tag:          cross priv_mode_u, vitt_width, svukte_tag_u;
+`endif
 `endif
 `endif
 `endif
@@ -1275,6 +1322,13 @@ covergroup Zimt_H_cg with function sample(ins_t ins);
     cp_vitt_hlsv_gva:       cross priv_mode_hs, hlsv_spvp, vitt_fault_gva;
     cp_vitt_hlsv_hu_gva:    cross priv_mode_u, vitt_fault_gva;
     cp_vitt_v_gva:          cross priv_mode_vs_vu, vitt_fault_gva;
+    // Svukte, which Svatag depends on, qualifies the tag accesses of VU-mode (senvcfg.UKTE) and of HLV with
+    // hstatus.SPVP = 0 (hstatus.HUKTE in HU-mode, senvcfg.UKTE in HS-mode)
+`ifdef SVUKTE_SUPPORTED
+    cp_svukte_tag_v:        cross priv_mode_vu, vitt_width, svukte_tag_v;
+    cp_svukte_tag_hu:       cross priv_mode_u, vitt_width, svukte_tag_hu;
+    cp_svukte_tag_hs:       cross priv_mode_hs, vitt_width, svukte_tag_hs;
+`endif
     cp_vs_mtag_code_access: cross priv_mode_vs, mt_enabled, checked_load_store, vs_mtag_code_access;
     // A guest-page fault in an implicit access of the VS-stage walk writes the pseudoinstruction to htinst, which
     // deposits the MTAG bit of the code page in hstatus.MTAG_I

@@ -856,6 +856,48 @@
         type_option.weight = 0;
         bins no_gva = {1'b0};
     }
+    // Svukte, which Svatag depends on (zimt_svukte_tag: {kind, address bit 63, HUKTE, UKTE, tag table base bit 63,
+    // outcome}): in U-mode, with the tag table of U-mode in the upper half, checktag, ld and settag are performed with
+    // senvcfg.UKTE = 0 and raise the page fault of their tag access with UKTE = 1; with the tag table in the lower half
+    // ld is performed with UKTE = 1; ld of an address in the upper half raises a page fault at its address with UKTE = 1
+    // and at its tag address (not canonical) with UKTE = 0
+    svukte_tag_u: coverpoint zimt_svukte_tag(ins) {
+        type_option.weight = 0;
+        bins checktag_upper      = {{3'd2, 1'b0, 1'b0, 1'b0, 1'b1, 2'd0}};
+        bins checktag_upper_ukte = {{3'd2, 1'b0, 1'b0, 1'b1, 1'b1, 2'd1}};
+        bins ld_upper            = {{3'd1, 1'b0, 1'b0, 1'b0, 1'b1, 2'd0}};
+        bins ld_upper_ukte       = {{3'd1, 1'b0, 1'b0, 1'b1, 1'b1, 2'd1}};
+        bins settag_upper        = {{3'd3, 1'b0, 1'b0, 1'b0, 1'b1, 2'd0}};
+        bins settag_upper_ukte   = {{3'd3, 1'b0, 1'b0, 1'b1, 1'b1, 2'd1}};
+        bins ld_lower_ukte       = {{3'd1, 1'b0, 1'b0, 1'b1, 1'b0, 2'd0}};
+        bins ld_upper_address_ukte = {{3'd1, 1'b1, 1'b0, 1'b1, 1'b0, 2'd2}};
+        bins ld_upper_address    = {{3'd1, 1'b1, 1'b0, 1'b0, 1'b0, 2'd1}};
+    }
+    // ...in M-mode with mstatus.MPRV = 1 and MPP = U: ld with the tag table in the upper half
+    svukte_tag_mprv: coverpoint zimt_svukte_tag(ins) {
+        type_option.weight = 0;
+        bins ld_upper      = {{3'd1, 1'b0, 1'b0, 1'b0, 1'b1, 2'd0}};
+        bins ld_upper_ukte = {{3'd1, 1'b0, 1'b0, 1'b1, 1'b1, 2'd1}};
+    }
+    // ...in VU-mode: ld and settag with the tag table in the upper half
+    svukte_tag_v: coverpoint zimt_svukte_tag(ins) {
+        type_option.weight = 0;
+        bins ld_upper          = {{3'd1, 1'b0, 1'b0, 1'b0, 1'b1, 2'd0}};
+        bins ld_upper_ukte     = {{3'd1, 1'b0, 1'b0, 1'b1, 1'b1, 2'd1}};
+        bins settag_upper_ukte = {{3'd3, 1'b0, 1'b0, 1'b1, 1'b1, 2'd1}};
+    }
+    // ...hlv.d with hstatus.SPVP = 0 in HU-mode, which hstatus.HUKTE qualifies, not senvcfg.UKTE...
+    svukte_tag_hu: coverpoint zimt_svukte_tag(ins) {
+        type_option.weight = 0;
+        bins hlv_upper_hukte = {{3'd4, 1'b0, 1'b1, 1'b0, 1'b1, 2'd1}};
+        bins hlv_upper_ukte  = {{3'd4, 1'b0, 1'b0, 1'b1, 1'b1, 2'd0}};
+    }
+    // ...and in HS-mode, which senvcfg.UKTE qualifies, not hstatus.HUKTE
+    svukte_tag_hs: coverpoint zimt_svukte_tag(ins) {
+        type_option.weight = 0;
+        bins hlv_upper_ukte  = {{3'd4, 1'b0, 1'b0, 1'b1, 1'b1, 2'd1}};
+        bins hlv_upper_hukte = {{3'd4, 1'b0, 1'b1, 1'b0, 1'b1, 2'd0}};
+    }
     // The tag width of the VITT range (zimt_vitt_range)
     vitt_width: coverpoint zimt_vitt_range(ins)[65:64] {
         type_option.weight = 0;
