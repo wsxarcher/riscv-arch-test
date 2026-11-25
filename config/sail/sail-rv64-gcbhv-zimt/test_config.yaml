@@ -1,7 +1,7 @@
 # sargantana4-rv64gcbh-zimt (Sargantana with Zimt memory tagging, both pointer tag widths, Svatag and
-# Smvatag) with V (VLEN 128), run on the Sail model itself, for the Zimt cases that need both S-mode and V.
-# sail.json is Sargantana's with V; rvmodel_macros.h and link.ld are sail-rv64-max's (HTIF console), with the
-# RAM of Sargantana's sail.json (256 MiB).
+# Smvatag) with V (VLEN 128) and the mcontrol6 triggers of Sdtrig, run on the Sail model itself, for the Zimt
+# cases that need S-mode and V or Sdtrig. sail.json is Sargantana's with V and Sdtrig; rvmodel_macros.h and
+# link.ld are sail-rv64-max's (HTIF console), with the RAM of Sargantana's sail.json (256 MiB).
 name: sail-rv64-gcbhv-zimt
 compiler_exe: riscv64-unknown-elf-gcc # executable name on $PATH or full path to executable
 objdump_exe: riscv64-unknown-elf-objdump # executable name on $PATH or full path to executable, optional

@@ -181,6 +181,9 @@ implemented_extensions:
   # "mstateen0-3" and "sstateen0-3" are implemented with the SE and ENVCFG bits writable:
   #   "mask = riscv_pkg::MSTATEEN0_SE | riscv_pkg::MSTATEEN0_ENVCFG;"
   #   https://github.com/bsc-loca/csr/blob/40a00a0ed81e8323ddb2110b9d64e4b6e497fe69/rtl/csr_bsc.sv#L1744-L1763
+  # With Zimt (def_pkg::RV_ZIMT), the MT bit of mstateen0 and hstateen0 (bit 53, the placeholder of the Sail
+  # model, which UDB does not define) is writable too ("riscv_pkg::MSTATEEN0_MT", "riscv_pkg::HSTATEEN0_MT"),
+  # as "MT" in sail.json
   - { name: Smstateen, version: "= 1.0.0" }
   - { name: Ssstateen, version: "= 1.0.0" }
   # "| (1   << 20)  // U - User mode implemented" / "| (1   << 18)  // S - Supervisor mode implemented"

@@ -70,6 +70,14 @@
 // the highest bit that no ratified extension uses (Svrsw60t59b has bits 60:59).
 #define PTE_MTAG             (1 << 58)
 
+// Zimt and Svatag: mstateen0.MT gates the S-level and H-level Zimt and Svatag CSRs below
+// M-mode, and hstateen0.MT the S-level ones in VS-mode. The draft specification does not
+// fix its position yet: bit 53 is the placeholder of the Sail reference model
+// (stateen_regs.sail), the next free bit of the upper half, which mstateen0 allocates
+// downwards from bit 63 to state that U-mode cannot access.
+#define MSTATEEN0_MT         (1 << 53)
+#define HSTATEEN0_MT         (1 << 53)
+
 #endif
 
 #endif

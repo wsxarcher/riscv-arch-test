@@ -12,8 +12,9 @@
 // and settags in the VITT range of their mode, at its edges, in S-mode, U-mode, VS-mode and VU-mode, through MPRV, of
 // HLV and HSV, also in HU-mode, and none of HLVX or with memory tagging disabled; with Svukte, which Svatag depends on,
 // the page faults of the tag accesses of U-mode and VU-mode in the upper half); the MT_MODE fields, the MTAG_I bits
-// and the tag generation exclusion mask CSRs; and the software-check exception (cause 18) in the delegation and cause
-// CSRs.
+// and the tag generation exclusion mask CSRs; mstateen0.MT and hstateen0.MT (Smstateen and Ssstateen), which gate the
+// access to the S-level and H-level CSRs of Zimt and Svatag; and the software-check exception (cause 18) in the
+// delegation and cause CSRs.
 //
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -34,6 +35,17 @@
     `define ZIMT_NO_BARE_VITT_RANGE
 `elsif UDB_SVATAG_NO_BARE_VITT_RANGE
     `define ZIMT_NO_BARE_VITT_RANGE
+`endif
+
+// SDTRIG_MCONTROL6_ANY: one of the triggers 0-15 supports mcontrol6, as the trigger tests (Zimt_Sm_trigger) use the
+// first of them, like the Sdtrig tests
+`include "general/RISCV_coverage_sdtrig_derived.svh"
+
+// The bytes of the cache block that cbo.zero zeroes (UDB_CACHE_BLOCK_SIZE; 64 without the parameter)
+`ifdef UDB_CACHE_BLOCK_SIZE
+    `define ZIMT_CBO_BLOCK_BYTES (64'(`UDB_CACHE_BLOCK_SIZE))
+`else
+    `define ZIMT_CBO_BLOCK_BYTES 64'd64
 `endif
 
 // xMT_MODE of the mode the instruction executes in: MT_MODE (bits 35:34) of mseccfg (M), menvcfg (S/HS),
@@ -677,11 +689,11 @@ function automatic logic [8:0] zimt_vitt_of(ins_t ins, logic disabled);
     case (kind)
         4'd1, 4'd12: first = zimt_vitt_masked(ins, ins.current.rs1_val + {{52{insn[31]}}, insn[31:20]});
         4'd2:        first = zimt_vitt_masked(ins, ins.current.rs1_val + {{52{insn[31]}}, insn[31:25], insn[11:7]});
-        4'd6:        first = rs1 & ~64'h3F;
+        4'd6:        first = rs1 & ~(`ZIMT_CBO_BLOCK_BYTES - 64'd1);
         4'd7:        first = rs1 & ~64'hF;
         default:     first = rs1;
     endcase
-    last = first + ((kind == 4'd6) ? 64'd63 : (kind == 4'd7) ? {56'd0, insn[23:20], 4'hF} : 64'd7);
+    last = first + ((kind == 4'd6) ? (`ZIMT_CBO_BLOCK_BYTES - 64'd1) : (kind == 4'd7) ? {56'd0, insn[23:20], 4'hF} : 64'd7);
     first_page = zimt_vitt_page(range, first);
     last_page  = zimt_vitt_page(range, last);
     if (first_page == last_page)                        page = first_page;
@@ -745,6 +757,85 @@ function automatic logic [8:0] zimt_svukte_tag(ins_t ins);
     else if ((exc == 8'h4D) && (tval == addr))                          outcome = 2'd2;
     else                                                                 outcome = 2'd3;
     return {kind, addr[63], hukte, senvcfg[8], base[63], outcome};
+endfunction
+
+// Sdtrig and the implicit tag checks: ld, sd, lr.d, sc.d, amoadd.d, cbo.zero, vle64.v and vse64.v (kind 1-6, 8 and 9
+// of zimt_vitt_kind), vlse64.v (10), vluxei64.v (11) and vle64ff.v (12) (zimt_trigger_kind) in M-mode with
+// mstatus.MPRV = 1 and MPP = S, and S-mode's memory tagging enabled (menvcfg.MT_MODE,
+// svitts), while the selected trigger is an mcontrol6 trigger of M-mode (m = 1) with the breakpoint action that
+// matches loads or stores with tdata2 the address of the access (pointer-masked, zimt_vitt_masked; the block base for
+// cbo.zero, element 0 for vle64.v) or the tag byte of the chunk at that address, svitts + (address >> 5) with 4-bit
+// tags and + (address >> 4) with 8-bit ones: {kind, where tdata2 points (1 the address, 2 the tag byte), outcome}. The
+// outcome: 1 a breakpoint exception (cause 3) with xtval = the address (0 on a hart that does not report it, without
+// REPORT_VA_IN_MTVAL_ON_BREAKPOINT), 2 a software-check exception, 0 none, 3 another one. 0 for another instruction
+// or trigger. The test's cbo.zero goes through the 256-byte aligned base of its block, which every compare option of
+// the Debug spec for cache operations gives for blocks of up to 256 bytes.
+function automatic logic [3:0] zimt_trigger_kind(ins_t ins);
+    logic [3:0]  kind = zimt_vitt_kind(ins);
+    logic [31:0] insn = ins.current.insn;
+    if (kind inside {4'd1, 4'd2, 4'd3, 4'd4, 4'd5, 4'd6, 4'd8, 4'd9}) return kind;
+    if (insn ==? VLSE64_V)   return 4'd10;
+    if (insn ==? VLUXEI64_V) return 4'd11;
+    if (insn ==? VLE64FF_V)  return 4'd12;
+    return 4'd0;
+endfunction
+
+function automatic logic [7:0] zimt_trigger(ins_t ins);
+    logic [3:0]      kind = zimt_trigger_kind(ins);
+    logic [31:0]     insn = ins.current.insn;
+    logic [XLEN-1:0] tdata1, tdata2, menvcfg;
+    logic [63:0]     addr, tag_va;
+    logic [1:0]      mt, where, outcome;
+    logic [7:0]      exc;
+    if ((kind == 4'd0) || (ins.prev.mode != 2'b11) || (zimt_mprv_mpp(ins) != 4'b1001)) return 8'h00;
+    tdata1 = get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_TDATA1);
+    if ((tdata1[XLEN-1:XLEN-4] != 4'd6) || !tdata1[6] || (tdata1[15:12] != 4'd0) || (tdata1[1:0] == 2'b00))
+        return 8'h00;
+    menvcfg = get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MENVCFG);
+    mt      = menvcfg[35:34];
+    if (!mt[1]) return 8'h00;
+    case (kind)
+        4'd1:    addr = zimt_vitt_masked(ins, ins.current.rs1_val + {{52{insn[31]}}, insn[31:20]});
+        4'd2:    addr = zimt_vitt_masked(ins, ins.current.rs1_val + {{52{insn[31]}}, insn[31:25], insn[11:7]});
+        4'd6:    addr = zimt_vitt_masked(ins, ins.current.rs1_val) & ~(`ZIMT_CBO_BLOCK_BYTES - 64'd1);
+        default: addr = zimt_vitt_masked(ins, ins.current.rs1_val);
+    endcase
+    tag_va = 64'(get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, 12'h5C2)) + (mt[0] ? (addr >> 4) : (addr >> 5));
+    tdata2 = get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_TDATA2);
+    if (64'(tdata2) == addr)        where = 2'd1;
+    else if (64'(tdata2) == tag_va) where = 2'd2;
+    else                            return 8'h00;
+    exc = zimt_exception(ins);
+    if (exc == 8'h00)                                         outcome = 2'd0;
+`ifdef UDB_REPORT_VA_IN_MTVAL_ON_BREAKPOINT
+    else if ((exc == 8'h43) && (zimt_trap_tval(ins) == addr)) outcome = 2'd1;
+`else
+    else if ((exc == 8'h43) && (zimt_trap_tval(ins) == 64'd0)) outcome = 2'd1;
+`endif
+    else if (exc == 8'h52)                                    outcome = 2'd2;
+    else                                                      outcome = 2'd3;
+    return {kind, where, outcome};
+endfunction
+
+// The load (1) and store (2) bits of the trigger of an access that zimt_trigger classifies, 0 for another one
+function automatic logic [1:0] zimt_trigger_xsl(ins_t ins);
+    if (zimt_trigger(ins) == 8'h00) return 2'd0;
+    return 2'(get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_TDATA1));
+endfunction
+
+// The set and clear forms of a CSR access: 1 csrrs and 2 csrrc with rs1 != x0, 3 csrrwi, 4 csrrsi and 5 csrrci with
+// uimm != 0; 0 for another instruction (csrrw, and csrrs/csrrc/csrrsi/csrrci that do not write)
+function automatic logic [2:0] zimt_csr_form(ins_t ins);
+    logic [31:0] insn = ins.current.insn;
+    if (insn[6:0] != 7'b1110011) return 3'd0;
+    case (insn[14:12])
+        3'b010:  return (insn[19:15] != 5'd0) ? 3'd1 : 3'd0;
+        3'b011:  return (insn[19:15] != 5'd0) ? 3'd2 : 3'd0;
+        3'b101:  return 3'd3;
+        3'b110:  return (insn[19:15] != 5'd0) ? 3'd4 : 3'd0;
+        3'b111:  return (insn[19:15] != 5'd0) ? 3'd5 : 3'd0;
+        default: return 3'd0;
+    endcase
 endfunction
 
 // Sm tests are not part of a certificate without Sm (EXCLUDE_SM), so neither is their covergroup
@@ -928,6 +1019,93 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
 `endif
 `endif
 `endif
+    // Sdtrig (Zimt_Sm_trigger), which needs S-mode, Smnpm, Svatag without its Bare VITT range, and an mcontrol6
+    // trigger (one of 0-15, SDTRIG_MCONTROL6_ANY) that can match M-mode loads and stores with match = 0, with tdata2,
+    // but neither Smvatag nor Smmpm: the tests use S-mode's memory tagging through MPRV
+`ifdef S_SUPPORTED
+`ifdef SMNPM_SUPPORTED
+`ifdef SVATAG_SUPPORTED
+`ifdef ZIMT_NO_BARE_VITT_RANGE
+`ifdef SDTRIG_MCONTROL6_ANY
+`ifdef UDB_SDTRIG_M_WRITABLE
+`ifdef UDB_SDTRIG_MCONTROL6_LOAD_WRITABLE
+`ifdef UDB_SDTRIG_MCONTROL6_STORE_WRITABLE
+`ifdef UDB_SDTRIG_MCONTROL6_MATCH_LEGAL_VALUES_0
+`ifdef UDB_TDATA2_IMPLEMENTED
+    // Sdtrig (zimt_trigger): with MPRV = 1 and MPP = S, an M-mode load or store address trigger on the address of an
+    // access whose pointer tag mismatches (Zimt_Sm_trigger) raises a breakpoint exception, which has priority over the
+    // tag check, as the trigger fires before the access (the timing that the Debug spec suggests and the test
+    // assumes)...
+    trigger_before_check: coverpoint zimt_trigger(ins) {
+        type_option.weight = 0;
+        bins ld       = {8'h15};
+        bins sd       = {8'h25};
+`ifdef ZALRSC_SUPPORTED
+        bins lr_d     = {8'h35};
+        bins sc_d     = {8'h45};
+`endif
+`ifdef ZAAMO_SUPPORTED
+        bins amoadd_d = {8'h55};
+`endif
+`ifdef ZICBOZ_SUPPORTED
+        bins cbo_zero = {8'h65};
+`endif
+`ifdef V_SUPPORTED
+        bins vle64_v    = {8'h85};
+        bins vse64_v    = {8'h95};
+        bins vlse64_v   = {8'hA5};
+        bins vluxei64_v = {8'hB5};
+        bins vle64ff_v  = {8'hC5};
+`endif
+    }
+    // ...and a load address trigger on the tag byte of its chunk does not match the tag loads of the tag check: none
+    // with the matching pointer tag, a software-check exception with a mismatching one
+    trigger_tag_load: coverpoint zimt_trigger(ins) {
+        type_option.weight = 0;
+        bins ld_match          = {8'h18};
+        bins ld_mismatch       = {8'h1A};
+        bins sd_match          = {8'h28};
+        bins sd_mismatch       = {8'h2A};
+`ifdef ZALRSC_SUPPORTED
+        bins lr_d_match        = {8'h38};
+        bins sc_d_match        = {8'h48};
+`endif
+`ifdef ZAAMO_SUPPORTED
+        bins amoadd_d_match    = {8'h58};
+        bins amoadd_d_mismatch = {8'h5A};
+`endif
+`ifdef ZICBOZ_SUPPORTED
+        bins cbo_zero_match    = {8'h68};
+`endif
+`ifdef V_SUPPORTED
+        bins vse64_v_match     = {8'h98};
+`endif
+    }
+    cp_trigger_before_check:       cross priv_mode_m, trigger_before_check;
+    cp_trigger_tag_load:           cross priv_mode_m, trigger_tag_load;
+`ifdef ZAAMO_SUPPORTED
+    // An AMO is a load and a store for triggers: a load trigger and a store trigger on a mismatching amoadd.d
+    trigger_amo: coverpoint zimt_trigger(ins) {
+        type_option.weight = 0;
+        bins amoadd_d = {8'h55};
+    }
+    trigger_xsl: coverpoint zimt_trigger_xsl(ins) {
+        type_option.weight = 0;
+        bins load  = {2'b01};
+        bins store = {2'b10};
+    }
+    cp_trigger_amo_xsl:            cross priv_mode_m, trigger_amo, trigger_xsl;
+`endif
+`endif
+`endif
+`endif
+`endif
+`endif
+`endif
+`endif
+`endif
+`endif
+`endif
     // S-mode loads and stores with mstatus.MTAG_I = 1, which only makes the loads and stores of M-mode with MPRV
     // unchecked: a load and a store with a mismatching pointer tag, whose software-check exception M-mode takes
     // (Zimt_S_checktag, with standard M-mode and Bare translation)
@@ -981,6 +1159,208 @@ covergroup Zimt_Sm_cg with function sample(ins_t ins);
     // ...whose access faults set mstatus.GVA
     cp_vitt_mprv_v_gva:            cross priv_mode_m, vitt_mprv_v_mode, vitt_fault_gva;
 `endif
+`endif
+`endif
+`endif
+
+`ifdef SMSTATEEN_SUPPORTED
+`ifdef S_SUPPORTED
+    // Smstateen and Ssstateen: mstateen0.MT gates the S-level and H-level CSRs of Zimt and Svatag below M-mode, and
+    // hstateen0.MT the S-level ones in VS-mode. The MT bit is bit 53, the placeholder of the Sail model
+    stateen_mt_s_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins senvmtagexclude0 = {12'h5C0};
+        bins senvmtagexclude1 = {12'h5C1};
+`ifdef SVATAG_SUPPORTED
+        bins svitts           = {12'h5C2};
+        bins svittu           = {12'h5C3};
+`endif
+    }
+    stateen_mt_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins senvmtagexclude0 = {12'h5C0};
+        bins senvmtagexclude1 = {12'h5C1};
+`ifdef SVATAG_SUPPORTED
+        bins svitts           = {12'h5C2};
+        bins svittu           = {12'h5C3};
+`endif
+`ifdef H_SUPPORTED
+        bins henvmtagexclude0 = {12'h6C0};
+        bins henvmtagexclude1 = {12'h6C1};
+`ifdef SVATAG_SUPPORTED
+        bins vsvitts          = {12'h6C2};
+        bins vsvittu          = {12'h6C3};
+`endif
+`endif
+    }
+    // The M-level CSRs of Zimt and Smvatag, which the MT bits do not gate
+    stateen_mt_m_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins mmtagexclude0    = {12'h7C0};
+        bins mmtagexclude1    = {12'h7C1};
+        bins menvmtagexclude0 = {12'h7C2};
+        bins menvmtagexclude1 = {12'h7C3};
+`ifdef SMVATAG_SUPPORTED
+        bins mvitt            = {12'h7C4};
+`endif
+    }
+    // mstateen0.MT before the instruction
+    mstateen0_mt: coverpoint get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53] {
+        type_option.weight = 0;
+        bins off = {1'b0};
+        bins on  = {1'b1};
+    }
+    mstateen0_mt_off: coverpoint get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53] {
+        type_option.weight = 0;
+        bins off = {1'b0};
+    }
+    mstateen0_mt_on: coverpoint get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53] {
+        type_option.weight = 0;
+        bins on = {1'b1};
+    }
+    // The exception that the access raised: none, illegal instruction or virtual instruction
+    stateen_mt_no_trap: coverpoint zimt_exception(ins) {
+        type_option.weight = 0;
+        bins none = {8'h00};
+    }
+    stateen_mt_illegal: coverpoint zimt_exception(ins) {
+        type_option.weight = 0;
+        bins illegal_instruction = {8'h42};
+    }
+    // mstateen0.MT written with csrs (set) and csrc (clear): the bit after the write. The boot code writes it with
+    // csrw, so only the test's csrs and csrc count
+    mstateen0_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins mstateen0 = {CSR_MSTATEEN0};
+    }
+    rs1_mt: coverpoint ins.current.rs1_val[53] {
+        type_option.weight = 0;
+        bins mt = {1'b1};
+    }
+    mstateen0_mt_written: coverpoint {ins.current.insn[14:12], get_csr_val(ins.hart, ins.issue, `SAMPLE_AFTER, CSR_MSTATEEN0)[53]}
+                          iff (ins.current.insn[6:0] == 7'b1110011) {
+        type_option.weight = 0;
+        bins set   = {4'b010_1};
+        bins clear = {4'b011_0};
+    }
+
+    // M-mode accesses the CSRs whatever mstateen0.MT, and so the M-level ones, which it does not gate
+    cp_stateen_mt_m:        cross priv_mode_m, csr_access_op, stateen_mt_csr, mstateen0_mt, stateen_mt_no_trap;
+    cp_stateen_mt_m_level:  cross priv_mode_m, csr_access_op, stateen_mt_m_csr, mstateen0_mt, stateen_mt_no_trap;
+    // The set and clear forms of the accesses (zimt_csr_form), to senvmtagexclude0 and henvmtagexclude0, from each
+    // mode in each state of the MT bits: the gating does not depend on the form (the signature records the outcomes)
+    stateen_mt_form: coverpoint zimt_csr_form(ins) {
+        type_option.weight = 0;
+        bins csrrs  = {3'd1};
+        bins csrrc  = {3'd2};
+        bins csrrwi = {3'd3};
+        bins csrrsi = {3'd4};
+        bins csrrci = {3'd5};
+    }
+    stateen_mt_form_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins senvmtagexclude0 = {12'h5C0};
+`ifdef H_SUPPORTED
+        bins henvmtagexclude0 = {12'h6C0};
+`endif
+    }
+`ifdef H_SUPPORTED
+    stateen_mt_state: coverpoint {get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53],
+                                  get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_HSTATEEN0)[53]} {
+        type_option.weight = 0;
+        wildcard bins m0 = {2'b0?};
+        bins m1_h0       = {2'b10};
+        bins m1_h1       = {2'b11};
+    }
+    cp_stateen_mt_forms:    cross priv_mode_m_hs_vs_u_vu, stateen_mt_form, stateen_mt_form_csr, stateen_mt_state;
+`else
+    cp_stateen_mt_forms:    cross priv_mode_m_s_u, stateen_mt_form, stateen_mt_form_csr, mstateen0_mt;
+`endif
+    // S-mode (HS-mode with H) accesses them with mstateen0.MT = 1, and raises an illegal instruction exception with 0
+    cp_stateen_mt_s_off:    cross priv_mode_s, csr_access_op, stateen_mt_csr, mstateen0_mt_off, stateen_mt_illegal;
+    cp_stateen_mt_s_on:     cross priv_mode_s, csr_access_op, stateen_mt_csr, mstateen0_mt_on, stateen_mt_no_trap;
+    // U-mode raises an illegal instruction exception whatever mstateen0.MT
+    cp_stateen_mt_u:        cross priv_mode_u, csr_access_op, stateen_mt_csr, mstateen0_mt, stateen_mt_illegal;
+    // mstateen0.MT is writable
+    cp_mstateen0_mt_write:  cross priv_mode_m, mstateen0_csr, rs1_mt, mstateen0_mt_written;
+`ifdef H_SUPPORTED
+    stateen_mt_h_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins henvmtagexclude0 = {12'h6C0};
+        bins henvmtagexclude1 = {12'h6C1};
+`ifdef SVATAG_SUPPORTED
+        bins vsvitts          = {12'h6C2};
+        bins vsvittu          = {12'h6C3};
+`endif
+    }
+    // {mstateen0.MT, hstateen0.MT} before the instruction, with mstateen0.MT = 1
+    stateen_mt_h_off: coverpoint {get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53],
+                                  get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_HSTATEEN0)[53]} {
+        type_option.weight = 0;
+        bins m1_h0 = {2'b10};
+    }
+    stateen_mt_h_on: coverpoint {get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53],
+                                 get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_HSTATEEN0)[53]} {
+        type_option.weight = 0;
+        bins m1_h1 = {2'b11};
+    }
+    stateen_mt_virtual: coverpoint zimt_exception(ins) {
+        type_option.weight = 0;
+        bins virtual_instruction = {8'h56};
+    }
+    // {mstateen0.MT, hstateen0.MT} before the instruction, with mstateen0.MT = 0: the hstateen0.MT written before,
+    // which reads 0 then
+    stateen_mt_m0: coverpoint {get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53],
+                               get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_HSTATEEN0)[53]} {
+        type_option.weight = 0;
+        bins m0_h0 = {2'b00};
+        bins m0_h1 = {2'b01};
+    }
+    // hstateen0.MT written with csrs and csrc while mstateen0.MT = 1, and with csrs while it is 0, when it stays
+    // read-only zero: {funct3, mstateen0.MT before, hstateen0.MT after}
+    hstateen0_csr: coverpoint ins.current.insn[31:20] {
+        type_option.weight = 0;
+        bins hstateen0 = {CSR_HSTATEEN0};
+    }
+    hstateen0_mt_written: coverpoint {ins.current.insn[14:12],
+                                      get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53],
+                                      get_csr_val(ins.hart, ins.issue, `SAMPLE_AFTER, CSR_HSTATEEN0)[53]}
+                          iff (ins.current.insn[6:0] == 7'b1110011) {
+        type_option.weight = 0;
+        bins set            = {5'b010_1_1};
+        bins clear          = {5'b011_1_0};
+        bins read_only_zero = {5'b010_0_0};
+    }
+    // A read of hstateen0 (csrr) while mstateen0.MT = 0 and the hstateen0.MT written before is 1, which reads 0:
+    // {mstateen0.MT, hstateen0.MT written before, the bit read}
+    hstateen0_mt_masked_read: coverpoint {get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53],
+                                          get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_HSTATEEN0)[53],
+                                          ins.current.rd_val[53]}
+                              iff ((ins.current.insn[19:12] == 8'b00000_010) && (ins.current.insn[6:0] == 7'b1110011)) {
+        type_option.weight = 0;
+        bins masked = {3'b0_1_0};
+    }
+    // {mstateen0.MT, hstateen0.MT} before the instruction, with mstateen0.MT = 1: both values of hstateen0.MT
+    stateen_mt_m1: coverpoint {get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_MSTATEEN0)[53],
+                               get_csr_val(ins.hart, ins.issue, `SAMPLE_BEFORE, CSR_HSTATEEN0)[53]} {
+        type_option.weight = 0;
+        bins m1_h0 = {2'b10};
+        bins m1_h1 = {2'b11};
+    }
+
+    // VS-mode and VU-mode raise an illegal instruction exception with mstateen0.MT = 0, whatever hstateen0.MT was
+    // written before
+    cp_stateen_mt_v_off:    cross priv_mode_vs_vu, csr_access_op, stateen_mt_csr, stateen_mt_m0, stateen_mt_illegal;
+    // With mstateen0.MT = 1, VS-mode accesses the S-level CSRs with hstateen0.MT = 1 (svitts and svittu reach vsvitts
+    // and vsvittu) and raises a virtual instruction exception with 0, and for the H-level ones; so does VU-mode
+    cp_stateen_mt_vs_h_off: cross priv_mode_vs, csr_access_op, stateen_mt_s_csr, stateen_mt_h_off, stateen_mt_virtual;
+    cp_stateen_mt_vs_h_on:  cross priv_mode_vs, csr_access_op, stateen_mt_s_csr, stateen_mt_h_on, stateen_mt_no_trap;
+    cp_stateen_mt_vs_hcsr:  cross priv_mode_vs, csr_access_op, stateen_mt_h_csr, stateen_mt_m1, stateen_mt_virtual;
+    cp_stateen_mt_vu_on:    cross priv_mode_vu, csr_access_op, stateen_mt_csr, stateen_mt_m1, stateen_mt_virtual;
+    // hstateen0.MT is writable while mstateen0.MT = 1, and read-only zero while it is 0
+    cp_hstateen0_mt_write:  cross priv_mode_m, hstateen0_csr, rs1_mt, hstateen0_mt_written;
+    // and reads 0 once mstateen0.MT is cleared while it is 1
+    cp_hstateen0_mt_masked: cross priv_mode_m, hstateen0_csr, hstateen0_mt_masked_read;
 `endif
 `endif
 `endif

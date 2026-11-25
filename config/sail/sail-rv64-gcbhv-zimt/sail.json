@@ -1078,6 +1078,9 @@
         "CONTEXT": "CSRBit_ReadOnlyZero",
         "P1P13": "CSRBit_ReadOnlyZero",
         "SRMCFG": "CSRBit_ReadOnlyZero",
+        // Zimt (experimental), at bit 53, a placeholder: with def_pkg::RV_ZIMT, "riscv_pkg::MSTATEEN0_MT" is in
+        // the write mask of mstateen0 and "riscv_pkg::HSTATEEN0_MT" in that of hstateen0 (csr_bsc.sv)
+        "MT": "CSRBit_Writable",
         "FCSR": "CSRBit_ReadOnlyZero",
         "C": "CSRBit_ReadOnlyZero"
       },
@@ -1097,6 +1100,7 @@
         "ENVCFG": "CSRBit_Writable",
         "CSRIND": "CSRBit_ReadOnlyZero",
         "CONTEXT": "CSRBit_ReadOnlyZero",
+        "MT": "CSRBit_Writable",
         "FCSR": "CSRBit_ReadOnlyZero",
         "C": "CSRBit_ReadOnlyZero"
       },
@@ -1125,15 +1129,18 @@
     "Svvptc": {
       "supported": false
     },
+    // Sargantana has no Sdtrig: this configuration supports its mcontrol6 triggers (with breakpoints delegatable
+    // through medeleg[3], as in Sargantana, so with the interrupt enables for reentrancy) for the cases of
+    // Zimt_Sm_trigger, which no Sargantana configuration runs.
     "Sdtrig": {
-      "supported": false,
+      "supported": true,
       // `breakpoint_reentrancy` must be one of the below strings:
       // . `Use_tcontrol`: use the `mte` and `mpte` bits in the `tcontrol` CSR (this also makes the `tcontrol` CSR available)
       // . `Use_interrupt_enables`: use `mstatus.MIE` and the `SIE` bits in `sstatus` and `vsstatus`
       // . `No_reentrancy_support`: no specific support for reentrancy
       // Note: `Use_tcontrol` hardwires medeleg[3] to 0, which breaks the
       // `sbreak` test in `riscv-tests`.
-      "breakpoint_reentrancy": "No_reentrancy_support",
+      "breakpoint_reentrancy": "Use_interrupt_enables",
       "tcontrol": { "supported": false },
       "etrigger": {
         "supported": false,
@@ -1163,7 +1170,7 @@
         "supported_interrupts": { "len": "xlen", "value": "0" }
       },
       "mcontrol6": {
-        "supported": false,
+        "supported": true,
         // If `mcontrol6` is supported, this value needs to be in the range
         // 0 < `maskmax6` < XLEN.
         "maskmax6": 63,
@@ -1179,7 +1186,7 @@
           "bits32": true,
           "bits48": true,
           "bits64": true,
-          "bits128": true
+          "bits128": false
         },
         "supported_data_access_sizes": {
           "bits8": true,
@@ -1217,7 +1224,7 @@
       // The number of supported triggers.  This has to be
       // non-negative, and greater than 0 if Sdtrig is supported.
       // The model does not support more than 16 triggers.
-      "num_triggers": 0,
+      "num_triggers": 4,
       "scontext": { "supported": false, "width": 32 }
     },
     "Smdbltrp": { "supported": false },

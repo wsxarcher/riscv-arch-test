@@ -1077,6 +1077,9 @@
         "CONTEXT": "CSRBit_ReadOnlyZero",
         "P1P13": "CSRBit_ReadOnlyZero",
         "SRMCFG": "CSRBit_ReadOnlyZero",
+        // Zimt (experimental), at bit 53, a placeholder: with def_pkg::RV_ZIMT, "riscv_pkg::MSTATEEN0_MT" is in
+        // the write mask of mstateen0 and "riscv_pkg::HSTATEEN0_MT" in that of hstateen0 (csr_bsc.sv)
+        "MT": "CSRBit_Writable",
         "FCSR": "CSRBit_ReadOnlyZero",
         "C": "CSRBit_ReadOnlyZero"
       },
@@ -1096,6 +1099,7 @@
         "ENVCFG": "CSRBit_Writable",
         "CSRIND": "CSRBit_ReadOnlyZero",
         "CONTEXT": "CSRBit_ReadOnlyZero",
+        "MT": "CSRBit_Writable",
         "FCSR": "CSRBit_ReadOnlyZero",
         "C": "CSRBit_ReadOnlyZero"
       },

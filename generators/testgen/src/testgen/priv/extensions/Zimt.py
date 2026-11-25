@@ -723,6 +723,264 @@ def _swcheck_cause_tests(test_data: TestData, cg: str, csr: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# Smstateen and Ssstateen: mstateen0.MT and hstateen0.MT
+# ---------------------------------------------------------------------------------------------------------------
+
+# The CSRs that mstateen0.MT gates below M-mode, and hstateen0.MT (the S-level ones) in VS-mode: (name, macro, level,
+# preprocessor condition for the CSR to exist beyond S-mode). The level is "s" for the S-level CSRs and "h" for the
+# H-level ones.
+STATEEN_MT_CSRS = (
+    ("senvmtagexclude0", "CSR_SENVMTAGEXCLUDE0", "s", None),
+    ("senvmtagexclude1", "CSR_SENVMTAGEXCLUDE1", "s", None),
+    ("svitts", "CSR_SVITTS", "s", "defined(SVATAG_SUPPORTED)"),
+    ("svittu", "CSR_SVITTU", "s", "defined(SVATAG_SUPPORTED)"),
+    ("henvmtagexclude0", "CSR_HENVMTAGEXCLUDE0", "h", "defined(H_SUPPORTED)"),
+    ("henvmtagexclude1", "CSR_HENVMTAGEXCLUDE1", "h", "defined(H_SUPPORTED)"),
+    ("vsvitts", "CSR_VSVITTS", "h", "defined(H_SUPPORTED) && defined(SVATAG_SUPPORTED)"),
+    ("vsvittu", "CSR_VSVITTU", "h", "defined(H_SUPPORTED) && defined(SVATAG_SUPPORTED)"),
+)
+# The M-level CSRs of Zimt and Smvatag (level "m"), which the MT bits do not gate: M-mode accesses them with them as
+# well, in each state of the MT bits (the other tests access them with both bits set)
+STATEEN_MT_M_CSRS = (
+    ("mmtagexclude0", "CSR_MMTAGEXCLUDE0", "m", None),
+    ("mmtagexclude1", "CSR_MMTAGEXCLUDE1", "m", None),
+    ("menvmtagexclude0", "CSR_MENVMTAGEXCLUDE0", "m", None),
+    ("menvmtagexclude1", "CSR_MENVMTAGEXCLUDE1", "m", None),
+    ("mvitt", "CSR_MVITT", "m", "defined(SMVATAG_SUPPORTED)"),
+)
+# Values written to them in M-mode before the accesses of each mode, so that their reads are known, and the values
+# that the accesses write, which M-mode reads back after them, so that a write that is performed shows in the CSR it
+# reaches (vsvitts and vsvittu for svitts and svittu in VS-mode) and one that traps in none: tag table bases 4 KiB
+# aligned, and exclusion masks that every hart keeps (bits 15:1 of a low CSR; 0 in a high one, whose bits are
+# hardwired to zero without 7-bit tags, and STATEEN_MT_TAG7_VALUES with them)
+STATEEN_MT_VALUES = {
+    "senvmtagexclude0": 0x5A02,
+    "senvmtagexclude1": 0,
+    "svitts": 0x8000_1000,
+    "svittu": 0x8000_2000,
+    "henvmtagexclude0": 0x3C04,
+    "henvmtagexclude1": 0,
+    "vsvitts": 0x8000_3000,
+    "vsvittu": 0x8000_4000,
+    "mmtagexclude0": 0x1E02,
+    "mmtagexclude1": 0,
+    "menvmtagexclude0": 0x3302,
+    "menvmtagexclude1": 0,
+    "mvitt": 0x8000_9000,
+}
+STATEEN_MT_WRITTEN = {
+    "senvmtagexclude0": 0x0A50,
+    "senvmtagexclude1": 0,
+    "svitts": 0x8000_5000,
+    "svittu": 0x8000_6000,
+    "henvmtagexclude0": 0x0C30,
+    "henvmtagexclude1": 0,
+    "vsvitts": 0x8000_7000,
+    "vsvittu": 0x8000_8000,
+    "mmtagexclude0": 0x2184,
+    "mmtagexclude1": 0,
+    "menvmtagexclude0": 0x0CC8,
+    "menvmtagexclude1": 0,
+    "mvitt": 0x8000_A000,
+}
+# With 7-bit tags (TAG7), the high exclusion masks hold the bits of the tags 64-127: (known value, written value)
+STATEEN_MT_TAG7_VALUES = {
+    "senvmtagexclude1": (0x0000_0F00_0000_00F0, 0x00F0_0000_0F00_0000),
+    "henvmtagexclude1": (0x0000_3C00_0000_0C00, 0x0C00_0000_3C00_0000),
+    "mmtagexclude1": (0x0000_0300_0000_0030, 0x0030_0000_0300_0000),
+    "menvmtagexclude1": (0x0000_C000_0000_000C, 0x000C_0000_C000_0000),
+}
+STATEEN_MT_MODES = ("M", "S", "U", "VS", "VU")
+# The states of the MT bits that the accesses run in: (name, mstateen0.MT, hstateen0.MT, modes). hstateen0.MT is
+# written while mstateen0.MT = 1, as it is read-only zero while mstateen0.MT = 0: with mstateen0.MT = 0, it was written
+# 1 (m0_h1) or 0 (m0_h0) before, which only VS-mode and VU-mode could tell apart (an illegal instruction exception in
+# both, which a hart that decides on hstateen0.MT alone would make a virtual one in m0_h0)
+STATEEN_MT_STATES = (
+    ("m0_h1", 0, 1, STATEEN_MT_MODES),
+    ("m0_h0", 0, 0, ("VS", "VU")),
+    ("m1_h0", 1, 0, STATEEN_MT_MODES),
+    ("m1_h1", 1, 1, STATEEN_MT_MODES),
+)
+STATEEN_MT_MODE_GUARDS = {"VS": "defined(H_SUPPORTED)", "VU": "defined(H_SUPPORTED)"}
+
+
+def _stateen_mt_outcome(mode: str, level: str, m: int, h: int) -> tuple[str, str]:
+    """The exception that an access to a CSR of level raises in mode with mstateen0.MT = m and hstateen0.MT = h, and
+    the coverpoint of the access."""
+    if level == "m":
+        return "none", "cp_stateen_mt_m_level"
+    if mode == "M":
+        return "none", "cp_stateen_mt_m"
+    if mode == "U":
+        return "illegal instruction", "cp_stateen_mt_u"
+    if not m:
+        return "illegal instruction", "cp_stateen_mt_s_off" if mode == "S" else "cp_stateen_mt_v_off"
+    if mode == "S":
+        return "none", "cp_stateen_mt_s_on"
+    if mode == "VU":
+        return "virtual instruction", "cp_stateen_mt_vu_on"
+    if level == "h":
+        return "virtual instruction", "cp_stateen_mt_vs_hcsr"
+    return ("none", "cp_stateen_mt_vs_h_on") if h else ("virtual instruction", "cp_stateen_mt_vs_h_off")
+
+
+def _stateen_mt_warl_tests(test_data: TestData, cg: str) -> list[str]:
+    """Set and clear mstateen0.MT, and hstateen0.MT with mstateen0.MT = 1 and = 0, recording the bit after each write.
+
+    hstateen0.MT reads 0 once mstateen0.MT is cleared while it is 1. Whether it reads 1 again once mstateen0.MT is set
+    again is not specified, so it is cleared then, and set while mstateen0.MT = 0 after it was cleared, so a hart
+    that keeps it while it reads as zero shows the same.
+    """
+    mt, val = test_data.int_regs.get_registers(2)
+
+    def record(csr: str) -> list[str]:
+        return [f"csrr x{val}, {csr}", f"and x{val}, x{val}, x{mt}", write_sigupd(val, test_data)]
+
+    lines = [
+        comment_banner(
+            "cp_mstateen0_mt_write, cp_hstateen0_mt_write, cp_hstateen0_mt_masked",
+            "Set and clear mstateen0.MT (bit 53, the placeholder of the Sail model) and record it: writable.\n"
+            "With H, set and clear hstateen0.MT with mstateen0.MT = 1 (writable); clear mstateen0.MT while\n"
+            "hstateen0.MT = 1 (read-only zero); then set it with mstateen0.MT = 0 (read-only zero) and record it",
+        ),
+        f"LI(x{mt}, MSTATEEN0_MT)",
+    ]
+    for op, state in (("csrc", "clear"), ("csrs", "set")):
+        lines += [
+            test_data.add_testcase(f"mstateen0_mt_{state}", "cp_mstateen0_mt_write", cg),
+            f"{op} mstateen0, x{mt}",
+            *record("mstateen0"),
+        ]
+
+    def write_h(op: str, state: str) -> list[str]:
+        return [
+            test_data.add_testcase(f"hstateen0_mt_{state}", "cp_hstateen0_mt_write", cg),
+            f"{op} hstateen0, x{mt}",
+            *record("hstateen0"),
+        ]
+
+    h_lines = [
+        *write_h("csrc", "clear"),
+        *write_h("csrs", "set"),
+        f"csrc mstateen0, x{mt}    # with hstateen0.MT = 1, which reads 0 then",
+        test_data.add_testcase("hstateen0_mt_masked", "cp_hstateen0_mt_masked", cg),
+        *record("hstateen0"),
+        f"csrs mstateen0, x{mt}    # hstateen0.MT reads 1 or 0: not recorded",
+        *write_h("csrc", "clear_again"),
+    ]
+    h_lines += [
+        f"csrc mstateen0, x{mt}    # mstateen0.MT = 0: hstateen0.MT reads 0",
+        test_data.add_testcase("hstateen0_mt_set_m0", "cp_hstateen0_mt_write", cg),
+        f"csrs hstateen0, x{mt}",
+        *record("hstateen0"),
+        f"csrs mstateen0, x{mt}",
+        f"csrs hstateen0, x{mt}",
+    ]
+    lines += gated(h_lines, "defined(H_SUPPORTED)")
+    test_data.int_regs.return_registers([mt, val])
+    return lines
+
+
+# The set and clear forms of the accesses, on one S-level and one H-level CSR: csrrs and csrrc with rs1 != x0 (bit 8),
+# csrrwi, and csrrsi and csrrci with uimm != 0. Performed after the csrrw, they leave 2 (bit 1) in the CSR
+STATEEN_MT_FORM_CSRS = ("senvmtagexclude0", "henvmtagexclude0")
+STATEEN_MT_FORMS = (
+    ("csrrs", "csrrs x{reg}, {macro}, x{bits}"),
+    ("csrrc", "csrrc x{reg}, {macro}, x{bits}"),
+    ("csrrwi", "csrrwi x{reg}, {macro}, 4"),
+    ("csrrsi", "csrrsi x{reg}, {macro}, 2"),
+    ("csrrci", "csrrci x{reg}, {macro}, 4"),
+)
+
+
+def _stateen_mt_value(reg: int, name: str, written: bool) -> list[str]:
+    """x{reg} = the known (STATEEN_MT_VALUES) or written (STATEEN_MT_WRITTEN) value of the CSR name."""
+    value = (STATEEN_MT_WRITTEN if written else STATEEN_MT_VALUES)[name]
+    if name not in STATEEN_MT_TAG7_VALUES:
+        return [f"LI(x{reg}, {value:#x})"]
+    return [
+        f"#ifdef {TAG7}",
+        f"LI(x{reg}, {STATEEN_MT_TAG7_VALUES[name][written]:#x})",
+        "#else",
+        f"LI(x{reg}, {value:#x})",
+        "#endif",
+    ]
+
+
+def _stateen_mt_access_tests(test_data: TestData, cg: str) -> list[str]:
+    """Read and write each CSR that the MT bits gate from M, S, U, VS and VU-mode, in each state of the MT bits.
+
+    Before the accesses of each mode, M-mode writes known values to the CSRs. Each access is a csrr, whose register
+    starts with a value that a trapping read leaves, then a csrrw of another value, which a trapping write leaves in
+    its register; the trap signature records the illegal and virtual instruction exceptions. After them, M-mode reads
+    every CSR back, so the signature shows which writes were performed and which CSR each one reached.
+    """
+    mt, reg, bits = test_data.int_regs.get_registers(3)
+    lines = [
+        comment_banner(
+            "cp_stateen_mt_*",
+            "Before the accesses of each mode, write known values to the CSRs that mstateen0.MT gates (from\n"
+            "M-mode); then read each one and write another value to it from M, S, U, VS and VU-mode, with\n"
+            "mstateen0.MT = 0 (and hstateen0.MT written 1 before; VS and VU-mode also with it written 0 before),\n"
+            "with mstateen0.MT = 1 and hstateen0.MT = 0, and with both 1, and read them all back from M-mode.\n"
+            "M-mode: no exception. Below M-mode with mstateen0.MT = 0, and\n"
+            "U-mode: illegal instruction. S-mode with mstateen0.MT = 1: no exception. VS-mode with mstateen0.MT = 1:\n"
+            "virtual instruction for the H-level CSRs and, with hstateen0.MT = 0, the S-level ones, which it\n"
+            "accesses with hstateen0.MT = 1 (svitts and svittu reach vsvitts and vsvittu). VU-mode with\n"
+            "mstateen0.MT = 1: virtual instruction. A write that traps changes no CSR. M-mode also accesses the\n"
+            "M-level CSRs (mmtagexclude0/1, menvmtagexclude0/1, mvitt), which the MT bits do not gate. The set and\n"
+            "clear forms (csrrs, csrrc, csrrwi, csrrsi, csrrci) access senvmtagexclude0 and henvmtagexclude0 too",
+        ),
+        f"LI(x{mt}, MSTATEEN0_MT)",
+    ]
+    for state, m, h, modes in STATEEN_MT_STATES:
+        lines += [
+            f"\n# mstateen0.MT = {m}, hstateen0.MT {'= ' + str(h) if m else 'written ' + str(h) + ' before'}",
+            f"csrs mstateen0, x{mt}",
+            *gated([f"{'csrs' if h else 'csrc'} hstateen0, x{mt}"], "defined(H_SUPPORTED)"),
+        ]
+        if not m:
+            lines.append(f"csrc mstateen0, x{mt}")
+        for mode in modes:
+            known, body, readback = [f"\n# {mode}-mode: known values"], [], [f"\n# {mode}-mode: read back"]
+            for name, macro, level, guard in STATEEN_MT_CSRS + (STATEEN_MT_M_CSRS if mode == "M" else ()):
+                outcome, coverpoint = _stateen_mt_outcome(mode, level, m, h)
+                known += gated([*_stateen_mt_value(reg, name, written=False), f"csrw {macro}, x{reg}"], guard)
+                body += gated(
+                    [
+                        f"LI(x{reg}, 42)    # a trapping read leaves it",
+                        test_data.add_testcase(f"{mode}_{state}_{name}_read", coverpoint, cg),
+                        f"csrr x{reg}, {macro}    # {outcome}",
+                        write_sigupd(reg, test_data),
+                        *_stateen_mt_value(reg, name, written=True),
+                        test_data.add_testcase(f"{mode}_{state}_{name}_write", coverpoint, cg),
+                        f"csrrw x{reg}, {macro}, x{reg}    # {outcome}; a trapping write leaves x{reg}",
+                        write_sigupd(reg, test_data),
+                    ],
+                    guard,
+                )
+                if name in STATEEN_MT_FORM_CSRS:
+                    forms = [f"LI(x{bits}, 0x100)"]
+                    for form, instr in STATEEN_MT_FORMS:
+                        forms += [
+                            f"LI(x{reg}, 42)",
+                            test_data.add_testcase(f"{mode}_{state}_{name}_{form}", "cp_stateen_mt_forms", cg),
+                            f"{instr.format(reg=reg, macro=macro, bits=bits)}    # {outcome}",
+                            write_sigupd(reg, test_data),
+                        ]
+                    body += gated(forms, guard)
+                readback += gated([f"csrr x{reg}, {macro}", write_sigupd(reg, test_data)], guard)
+            if mode != "M":
+                body = [f"\nRVTEST_TSBI_GOTO_{mode}MODE", *body, "\nRVTEST_TSBI_GOTO_MMODE"]
+            lines += gated([*known, *body, *readback], STATEEN_MT_MODE_GUARDS.get(mode))
+    lines += [f"csrs mstateen0, x{mt}", *gated([f"csrs hstateen0, x{mt}"], "defined(H_SUPPORTED)")]
+    for _, macro, _, guard in STATEEN_MT_CSRS + STATEEN_MT_M_CSRS:
+        lines += gated([f"csrw {macro}, x0"], guard)
+    test_data.int_regs.return_registers([mt, reg, bits])
+    return lines
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # Memory tagging enabled
 # ---------------------------------------------------------------------------------------------------------------
 
@@ -2964,6 +3222,471 @@ def _m_checked_mprv_tests(test_data: TestData, cg: str, mt_mode: int) -> list[st
         "csrw CSR_SVITTS, x0",
     ]
     test_data.int_regs.return_registers([ptr, val, tmp, mprv, save])
+    return lines
+
+
+# mcontrol6 (tdata1.type = 6) with the breakpoint action (0), match = 0 (equal) and any size (0); its load (bit 0) or
+# store (bit 1) bit selects the accesses it matches. ZIMT_MCONTROL6 (_trigger_defines) also sets m (bit 6), and s
+# (bit 4) where it is writable, so that the trigger matches whether a hart takes the privilege of an MPRV access as M
+# or as MPP = S (nothing runs in S-mode while it is armed).
+TRIGGER_LOAD, TRIGGER_STORE = 0b01, 0b10
+# The cbo.zero of the trigger tests goes through the base of its block, at a data chunk 256-byte aligned, so that the
+# three compare values that the Debug spec allows for cache operations (every address of the block, its base, the
+# effective address) give the same address for blocks of up to 256 bytes. Every data chunk has the matching tag, so a
+# block of any of those sizes mismatches its pointer, and the breakpoint keeps cbo.zero from zeroing the data of the
+# other trigger cases (REGULAR_CHUNK, VECTOR_CHUNK) that a larger block holds
+TRIGGER_CBO_CHUNK = 48
+# The Sdtrig tests cover the triggers 0-15 (SdtrigCommon.SDTRIG_MAX_TRIGGERS); the trigger tests use the first of them
+# that supports mcontrol6, ZIMT_MCONTROL6_TRIGGER, on a hart whose mcontrol6 triggers can match M-mode loads and
+# stores with match = 0, and that has tdata2 (as the Sdtrig tests' gates, which leave no WARL field value to chance)
+TRIGGER_CANDIDATES = 16
+TRIGGER_CAPABLE = (
+    "defined(ZIMT_MCONTROL6_TRIGGER) && defined(UDB_SDTRIG_M_WRITABLE) && defined(UDB_SDTRIG_MCONTROL6_LOAD_WRITABLE)"
+    " && defined(UDB_SDTRIG_MCONTROL6_STORE_WRITABLE) && defined(UDB_SDTRIG_MCONTROL6_MATCH_LEGAL_VALUES_0)"
+    " && defined(UDB_TDATA2_IMPLEMENTED)"
+)
+
+
+def _trigger_defines() -> list[str]:
+    """Define ZIMT_MCONTROL6_TRIGGER, the first trigger that supports mcontrol6, and ZIMT_MCONTROL6."""
+    lines = []
+    for n in range(TRIGGER_CANDIDATES):
+        lines += [
+            f"#{'if' if n == 0 else 'elif'} defined(UDB_SDTRIG_MCONTROL6_SUPPORTED_TRIGGERS_{n})",
+            f"#define ZIMT_MCONTROL6_TRIGGER {n}",
+        ]
+    return [
+        *lines,
+        "#endif",
+        "#ifdef UDB_SDTRIG_S_WRITABLE",
+        "#define ZIMT_MCONTROL6 ((6 << 60) | (1 << 6) | (1 << 4))",
+        "#else",
+        "#define ZIMT_MCONTROL6 ((6 << 60) | (1 << 6))",
+        "#endif",
+    ]
+
+
+def _m_trigger_tests(test_data: TestData, cg: str, mt_mode: int) -> list[str]:
+    """Sdtrig and the implicit tag checks, in M-mode with mstatus.MPRV = 1 and MPP = S: the accesses are checked with
+    S-mode's MT_MODE (menvcfg) and tag table (svitts), whose address translation is Bare, while M-mode, whose trap
+    handler takes their exceptions, keeps memory tagging disabled; triggers match them in M-mode, the mode the hart is
+    in. The first mcontrol6 trigger (ZIMT_MCONTROL6_TRIGGER), of M-mode (and S-mode where its s bit is writable) with
+    the breakpoint action, on the address of an access with a mismatching pointer tag: a breakpoint exception (cause 3,
+    xtval the address), as a data address breakpoint has priority over the tag check. A load trigger for ld, lr.d,
+    amoadd.d, vle64.v, and vlse64.v, vluxei64.v and vle64ff.v on element 0; a store trigger for sd, sc.d, amoadd.d,
+    vse64.v and cbo.zero, through and on the 256-byte aligned base of its block. The sc.d holds the reservation of an
+    lr.d through the matching pointer tag just before it, as the Debug spec leaves it unspecified whether a failing sc
+    matches store triggers. A load trigger on the tag byte of the chunk of ld, sd and amoadd.d: none with the matching
+    pointer tag, a software-check exception with a mismatching one, as the tag loads of the check are not matched by
+    triggers; also none for a matching LR/SC pair, vse64.v and cbo.zero. Record rd and memory.
+
+    Like the Sdtrig tests, these assume that load and store address triggers fire before the access, the timing that
+    the Debug spec suggests: mcontrol6 triggers may fire whenever it is convenient, and the priority of a breakpoint
+    over the exceptions of the access, and so over its tag check, holds only for a trigger that fires before it."""
+    name = MT_NAMES[mt_mode]
+    ptr, good, val, tmp, mprv, save = test_data.int_regs.get_registers(6)
+    mt = f"{mt_mode << MT_MODE_LSB:#x}"
+    good_tag, bad_tag = GOOD_TAG[mt_mode], BAD_TAG[mt_mode]
+
+    def arm(xsl: int, address: list[str]) -> list[str]:
+        """Arm the trigger on the address that the lines address put in x{tmp}."""
+        return [*address, f"csrw tdata2, x{tmp}", f"LI(x{tmp}, ZIMT_MCONTROL6 | {xsl:#x})", f"csrw tdata1, x{tmp}"]
+
+    def data_address(chunk: int) -> list[str]:
+        return [f"LA(x{tmp}, {CHECK_DATA} + {16 * chunk})"]
+
+    def tag_address(chunk: int) -> list[str]:
+        """The tag byte of data chunk chunk (x{save} holds that of data chunk 0)."""
+        return [f"addi x{tmp}, x{save}, {chunk if mt_mode == MT_TAG7 else chunk // 2}"]
+
+    def triggered(
+        case: str, coverpoint: str, arch: str, xsl: int, address: list[str], instr: str, before: tuple[str, ...] = ()
+    ) -> list[str]:
+        """Arm the trigger, then instr (the testcase) with MPRV, after the lines before."""
+        return [
+            *arm(xsl, address),
+            *_regular_access(
+                test_data,
+                cg,
+                coverpoint,
+                f"M_{name}_{case}",
+                arch,
+                [instr],
+                ([f"csrs mstatus, x{mprv}", *before], [f"csrc mstatus, x{mprv}"]),
+            ),
+            "csrw tdata1, x0    # disarm",
+        ]
+
+    lines = [
+        comment_banner(
+            f"cp_trigger_before_check, cp_trigger_amo_xsl, cp_trigger_tag_load (M, {name})",
+            f"In M-mode with mstatus.MPRV = 1 and MPP = S, and {TAG_BITS[mt_mode]}-bit tags in S-mode\n"
+            "(menvcfg.MT_MODE, svitts), with the first mcontrol6 trigger, of M-mode, with the breakpoint action: on\n"
+            "the address of ld, sd, lr.d, sc.d, amoadd.d (a store and a load trigger), cbo.zero, vle64.v, vse64.v,\n"
+            "vlse64.v, vluxei64.v and vle64ff.v with a mismatching pointer tag, a breakpoint exception (cause 3,\n"
+            "mtval the address) before the tag check, rd, vd and memory unchanged (the sc.d holds the reservation\n"
+            "of an lr.d through the matching pointer tag); a load trigger on the tag byte of the chunk of ld, sd\n"
+            f"and amoadd.d: none with the matching pointer tag, a {SW_CHECK_TEXT} with a\n"
+            "mismatching one, as the tag loads of the tag check do not match triggers; none for a matching LR/SC\n"
+            "pair, vse64.v and cbo.zero either. Record rd and memory. Load and store address triggers are assumed\n"
+            "to fire before the access (the suggested timing)",
+        ),
+        *_check_vitt("CSR_SVITTS", mt_mode, (save, tmp, val)),
+        *_check_fill(mt_mode, save, tmp),
+        *_check_tags(mt_mode, save, tmp),
+        *_set_pmm(tmp, "SMNPM"),
+        f"LI(x{val}, {mt})",
+        f"or x{tmp}, x{tmp}, x{val}",
+        f"csrs menvcfg, x{tmp}",
+        f"LI(x{tmp}, MSTATUS_MPP)",
+        f"csrc mstatus, x{tmp}",
+        f"LI(x{mprv}, MSTATUS_MPRV | {1 << 11:#x})    # MPP = S",
+        *_check_pointer(good, tmp, mt_mode, REGULAR_CHUNK, good_tag),
+        *_check_pointer(ptr, tmp, mt_mode, REGULAR_CHUNK, bad_tag),
+        f"LI(x{tmp}, ZIMT_MCONTROL6_TRIGGER)",
+        f"csrw tselect, x{tmp}",
+        "csrw tdata1, x0",
+        "#ifdef UDB_TDATA3_IMPLEMENTED",
+        "csrw tdata3, x0    # no textra condition",
+        "#endif",
+        "csrsi mstatus, 0x8    # MIE = 1: M-mode breakpoints need it (or tcontrol.MTE)",
+        "#ifdef UDB_SDTRIG_BREAKPOINT_REENTRANCY_USE_TCONTROL",
+        "csrsi tcontrol, 0x8    # MTE = 1",
+        "#endif",
+        # A data address breakpoint has priority over the tag check
+        f"LI(x{val}, {RD_CANARY:#x})",
+        *triggered(
+            "ld_trigger",
+            "cp_trigger_before_check",
+            "+zicsr",
+            TRIGGER_LOAD,
+            data_address(REGULAR_CHUNK),
+            f"ld x{val}, 0(x{ptr})",
+        ),
+        write_sigupd(val, test_data),
+        f"LI(x{val}, 0xfedcba9876543210)",
+        *triggered(
+            "sd_trigger",
+            "cp_trigger_before_check",
+            "+zicsr",
+            TRIGGER_STORE,
+            data_address(REGULAR_CHUNK),
+            f"sd x{val}, 0(x{ptr})",
+        ),
+        *_record_via_sp(test_data, good, 0, val, save),
+        *_check_tags(mt_mode, save, tmp),
+    ]
+    lines += gated(
+        [
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *triggered(
+                "lr_trigger",
+                "cp_trigger_before_check",
+                "+zalrsc",
+                TRIGGER_LOAD,
+                data_address(REGULAR_CHUNK),
+                f"lr.d x{val}, (x{ptr})",
+            ),
+            write_sigupd(val, test_data),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            # A successful sc is a store for triggers, a failing one may not be (Debug spec): the sc holds the
+            # reservation of an lr.d through the matching pointer tag just before it (a constrained LR/SC
+            # sequence), which the store trigger does not match
+            *triggered(
+                "sc_trigger",
+                "cp_trigger_before_check",
+                "+zalrsc",
+                TRIGGER_STORE,
+                data_address(REGULAR_CHUNK),
+                f"sc.d x{val}, x{val}, (x{ptr})",
+                (f"lr.d x{tmp}, (x{good})    # the reservation",),
+            ),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, good, 0, val, save),
+            *_check_tags(mt_mode, save, tmp),
+        ],
+        "defined(ZALRSC_SUPPORTED)",
+    )
+    lines += gated(
+        [
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *triggered(
+                "amoadd_trigger",
+                "cp_trigger_before_check",
+                "+zaamo",
+                TRIGGER_STORE,
+                data_address(REGULAR_CHUNK),
+                f"amoadd.d x{val}, x{val}, (x{ptr})",
+            ),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, good, 0, val, save),
+            *_check_tags(mt_mode, save, tmp),
+            # An AMO is a load too: a load trigger matches it as well
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *triggered(
+                "amoadd_load_trigger",
+                "cp_trigger_amo_xsl",
+                "+zaamo",
+                TRIGGER_LOAD,
+                data_address(REGULAR_CHUNK),
+                f"amoadd.d x{val}, x{val}, (x{ptr})",
+            ),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, good, 0, val, save),
+            *_check_tags(mt_mode, save, tmp),
+        ],
+        "defined(ZAAMO_SUPPORTED)",
+    )
+    lines += gated(
+        [
+            *_check_pointer(ptr, tmp, mt_mode, TRIGGER_CBO_CHUNK, bad_tag),
+            *_check_pointer(good, tmp, mt_mode, TRIGGER_CBO_CHUNK, good_tag),
+            *_fill_via_sp(good, val, save, tuple((dword, CBO_ZERO_PATTERN) for dword in range(0, 64, 8))),
+            *triggered(
+                "cbo_zero_trigger",
+                "cp_trigger_before_check",
+                "+zicboz",
+                TRIGGER_STORE,
+                data_address(TRIGGER_CBO_CHUNK),
+                f"cbo.zero (x{ptr})",
+            ),
+            *[line for dword in (0, 56) for line in _record_via_sp(test_data, good, dword, val, save)],
+            *_check_tags(mt_mode, save, tmp),
+        ],
+        "defined(ZICBOZ_SUPPORTED)",
+    )
+    lines += gated(
+        [
+            f"LI(x{tmp}, MSTATUS_VS)",
+            f"csrs mstatus, x{tmp}",
+            *_check_pointer(ptr, tmp, mt_mode, VECTOR_CHUNK, bad_tag),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            ".option push",
+            ".option arch, +v",
+            "vsetivli x0, 2, e64, m1, ta, ma",
+            f"vmv.v.x v24, x{val}",
+            ".option pop",
+            *triggered(
+                "vle_trigger",
+                "cp_trigger_before_check",
+                "+v",
+                TRIGGER_LOAD,
+                data_address(VECTOR_CHUNK),
+                f"vle64.v v24, (x{ptr})",
+            ),
+            f"csrr x{val}, vstart",
+            write_sigupd(val, test_data),
+            "csrw vstart, x0",
+            *_record_vreg(test_data, val, 24),
+            *_check_tags(mt_mode, save, tmp),
+            # The other vector forms, on their element 0: a store trigger on vse64.v (its memory unchanged), and a load
+            # trigger on the strided vlse64.v (stride 16), the indexed vluxei64.v (offsets 0 and 16 in v28) and the
+            # fault-only-first vle64ff.v (vl unchanged), vd unchanged
+            *_check_pointer(good, tmp, mt_mode, VECTOR_CHUNK, good_tag),
+            *triggered(
+                "vse_trigger",
+                "cp_trigger_before_check",
+                "+v",
+                TRIGGER_STORE,
+                data_address(VECTOR_CHUNK),
+                f"vse64.v v24, (x{ptr})",
+            ),
+            f"csrr x{val}, vstart",
+            write_sigupd(val, test_data),
+            "csrw vstart, x0",
+            *[line for dword in (0, 8) for line in _record_via_sp(test_data, good, dword, val, save)],
+            *_check_tags(mt_mode, save, tmp),
+            ".option push",
+            ".option arch, +v",
+            "vid.v v28",
+            "vsll.vi v28, v28, 4",
+            ".option pop",
+            *triggered(
+                "vlse_trigger",
+                "cp_trigger_before_check",
+                "+v",
+                TRIGGER_LOAD,
+                data_address(VECTOR_CHUNK),
+                f"vlse64.v v24, (x{ptr}), x{tmp}",
+                (f"LI(x{tmp}, 16)    # stride",),
+            ),
+            *triggered(
+                "vluxei_trigger",
+                "cp_trigger_before_check",
+                "+v",
+                TRIGGER_LOAD,
+                data_address(VECTOR_CHUNK),
+                f"vluxei64.v v24, (x{ptr}), v28",
+            ),
+            *triggered(
+                "vleff_trigger",
+                "cp_trigger_before_check",
+                "+v",
+                TRIGGER_LOAD,
+                data_address(VECTOR_CHUNK),
+                f"vle64ff.v v24, (x{ptr})",
+            ),
+            f"csrr x{val}, vl",
+            write_sigupd(val, test_data),
+            f"csrr x{val}, vstart",
+            write_sigupd(val, test_data),
+            "csrw vstart, x0",
+            *_record_vreg(test_data, val, 24),
+        ],
+        "defined(V_SUPPORTED)",
+    )
+    # The tag loads of the check do not match triggers
+    lines += [
+        *_check_pointer(good, tmp, mt_mode, REGULAR_CHUNK, good_tag),
+        *_check_pointer(ptr, tmp, mt_mode, REGULAR_CHUNK, bad_tag),
+        f"LI(x{val}, {RD_CANARY:#x})",
+        *triggered(
+            "ld_tag_trigger_match",
+            "cp_trigger_tag_load",
+            "+zicsr",
+            TRIGGER_LOAD,
+            tag_address(REGULAR_CHUNK),
+            f"ld x{val}, 0(x{good})",
+        ),
+        write_sigupd(val, test_data),
+        f"LI(x{val}, {RD_CANARY:#x})",
+        *triggered(
+            "ld_tag_trigger_mismatch",
+            "cp_trigger_tag_load",
+            "+zicsr",
+            TRIGGER_LOAD,
+            tag_address(REGULAR_CHUNK),
+            f"ld x{val}, 0(x{ptr})",
+        ),
+        write_sigupd(val, test_data),
+        f"LI(x{val}, 0x0123456789abcdef)",
+        *triggered(
+            "sd_tag_trigger_mismatch",
+            "cp_trigger_tag_load",
+            "+zicsr",
+            TRIGGER_LOAD,
+            tag_address(REGULAR_CHUNK),
+            f"sd x{val}, 0(x{ptr})",
+        ),
+        *_record_via_sp(test_data, good, 0, val, save),
+        *_check_tags(mt_mode, save, tmp),
+        f"LI(x{val}, 0x0123456789abcdef)",
+        *triggered(
+            "sd_tag_trigger_match",
+            "cp_trigger_tag_load",
+            "+zicsr",
+            TRIGGER_LOAD,
+            tag_address(REGULAR_CHUNK),
+            f"sd x{val}, 0(x{good})",
+        ),
+        *_record_via_sp(test_data, good, 0, val, save),
+        *_check_tags(mt_mode, save, tmp),
+    ]
+    lines += gated(
+        [
+            f"LI(x{val}, 3)",
+            *triggered(
+                "amoadd_tag_trigger_match",
+                "cp_trigger_tag_load",
+                "+zaamo",
+                TRIGGER_LOAD,
+                tag_address(REGULAR_CHUNK),
+                f"amoadd.d x{val}, x{val}, (x{good})",
+            ),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, good, 0, val, save),
+            *_check_tags(mt_mode, save, tmp),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *triggered(
+                "amoadd_tag_trigger_mismatch",
+                "cp_trigger_tag_load",
+                "+zaamo",
+                TRIGGER_LOAD,
+                tag_address(REGULAR_CHUNK),
+                f"amoadd.d x{val}, x{val}, (x{ptr})",
+            ),
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, good, 0, val, save),
+            *_check_tags(mt_mode, save, tmp),
+        ],
+        "defined(ZAAMO_SUPPORTED)",
+    )
+    # A matching LR/SC pair (a constrained sequence; the sc rewrites the value loaded, and whether it succeeds is not
+    # recorded), vse64.v and cbo.zero (last: it zeroes its block) with the load trigger on their tag byte: performed
+    lines += gated(
+        [
+            f"LI(x{val}, {RD_CANARY:#x})",
+            *arm(TRIGGER_LOAD, tag_address(REGULAR_CHUNK)),
+            ".option push",
+            ".option arch, +zalrsc",
+            f"csrs mstatus, x{mprv}",
+            test_data.add_testcase(f"M_{name}_lr_tag_trigger_match", "cp_trigger_tag_load", cg),
+            f"lr.d x{val}, (x{good})",
+            test_data.add_testcase(f"M_{name}_sc_tag_trigger_match", "cp_trigger_tag_load", cg),
+            f"sc.d x{tmp}, x{val}, (x{good})",
+            f"csrc mstatus, x{mprv}",
+            ".option pop",
+            "csrw tdata1, x0    # disarm",
+            write_sigupd(val, test_data),
+            *_record_via_sp(test_data, good, 0, val, save),
+            *_check_tags(mt_mode, save, tmp),
+        ],
+        "defined(ZALRSC_SUPPORTED)",
+    )
+    lines += gated(
+        [
+            f"LI(x{tmp}, MSTATUS_VS)",
+            f"csrs mstatus, x{tmp}",
+            *_check_pointer(good, tmp, mt_mode, VECTOR_CHUNK, good_tag),
+            f"LI(x{val}, {RD_CANARY:#x})",
+            ".option push",
+            ".option arch, +v",
+            "vsetivli x0, 2, e64, m1, ta, ma",
+            f"vmv.v.x v24, x{val}",
+            ".option pop",
+            *triggered(
+                "vse_tag_trigger_match",
+                "cp_trigger_tag_load",
+                "+v",
+                TRIGGER_LOAD,
+                tag_address(VECTOR_CHUNK),
+                f"vse64.v v24, (x{good})",
+            ),
+            *[line for dword in (0, 8) for line in _record_via_sp(test_data, good, dword, val, save)],
+            *_check_tags(mt_mode, save, tmp),
+        ],
+        "defined(V_SUPPORTED)",
+    )
+    lines += gated(
+        [
+            *_check_pointer(good, tmp, mt_mode, TRIGGER_CBO_CHUNK, good_tag),
+            *_fill_via_sp(good, val, save, tuple((dword, CBO_ZERO_PATTERN) for dword in range(0, 64, 8))),
+            *_check_tags(mt_mode, save, tmp),
+            *triggered(
+                "cbo_zero_tag_trigger_match",
+                "cp_trigger_tag_load",
+                "+zicboz",
+                TRIGGER_LOAD,
+                tag_address(TRIGGER_CBO_CHUNK),
+                f"cbo.zero (x{good})",
+            ),
+            *[line for dword in (0, 56) for line in _record_via_sp(test_data, good, dword, val, save)],
+            *_check_tags(mt_mode, save, tmp),
+        ],
+        "defined(ZICBOZ_SUPPORTED)",
+    )
+    lines += [
+        "csrci mstatus, 0x8    # MIE = 0",
+        "#ifdef UDB_SDTRIG_BREAKPOINT_REENTRANCY_USE_TCONTROL",
+        "csrci tcontrol, 0x8    # MTE = 0",
+        "#endif",
+        f"LI(x{tmp}, {mt})",
+        f"csrc menvcfg, x{tmp}",
+        f"LI(x{tmp}, {0b11 << PMM_LSB:#x})",
+        f"csrc menvcfg, x{tmp}",
+        "csrw CSR_SVITTS, x0",
+    ]
+    test_data.int_regs.return_registers([ptr, good, val, tmp, mprv, save])
     return lines
 
 
@@ -5699,6 +6422,24 @@ def make_zimt_h(test_data: TestData) -> list[TestChunk]:
 
 @add_priv_test_generator(
     "Zimt",
+    required_extensions=["Zimt", "Zimop", "Sm", "S", "Smstateen"],
+    params=["MXLEN: 64"],
+    extra_defines=["#define BOOT_TO_MMODE"],
+)
+def make_zimt_sm_stateen(test_data: TestData) -> list[TestChunk]:
+    """Generate the tests of mstateen0.MT and hstateen0.MT, which gate the S-level and H-level Zimt and Svatag CSRs.
+
+    M-mode writes mstateen0 and hstateen0, and the CSRs are accessed from M, S, U, VS and VU-mode through T-SBI mode
+    changes. The boot code sets both MT bits, which the tests set again at their end.
+    """
+    cg = "Zimt_Sm_cg"
+    tc = test_data.begin_test_chunk("Sm_stateen")
+    tc.code += [*_stateen_mt_warl_tests(test_data, cg), *_stateen_mt_access_tests(test_data, cg)]
+    return [test_data.end_test_chunk()]
+
+
+@add_priv_test_generator(
+    "Zimt",
     required_extensions=["Zimt", "Zimop", "Sm", "Smvatag", "Smmpm"],
     march_extensions=["Zimop"],
     params=["MXLEN: 64"],
@@ -6316,6 +7057,33 @@ def make_zimt_sm_checktag(test_data: TestData) -> list[TestChunk]:
         "csrw CSR_MVITT, x0",
     ]
     test_data.int_regs.return_registers([val, tmp])
+    tc.raw_data += [*_tag_table_data(), *_check_data()]
+    return [test_data.end_test_chunk()]
+
+
+@add_priv_test_generator(
+    "Zimt",
+    required_extensions=["Zimt", "Zimop", "Sm", "S", "Svatag", "Smnpm", "Sdtrig"],
+    march_extensions=["Zimop"],
+    params=["MXLEN: 64"],
+    extra_defines=["#define BOOT_TO_MMODE"],
+)
+def make_zimt_sm_trigger(test_data: TestData) -> list[TestChunk]:
+    """Generate the tests of the implicit tag checks with Sdtrig triggers, in M-mode with mstatus.MPRV = 1 and MPP = S.
+
+    The accesses are checked with S-mode's memory tagging (menvcfg.MT_MODE, svitts, Smnpm), with Bare translation, so
+    the tests exist only without Svatag's Bare VITT range; M-mode, whose trap handler takes the breakpoint and
+    software-check exceptions, keeps memory tagging disabled. Like the Sdtrig tests, they assume that load and store
+    address triggers fire before the access.
+    """
+    _check_sig_reg(test_data)
+    cg = "Zimt_Sm_cg"
+    tc = test_data.begin_test_chunk("Sm_trigger")
+    lines = []
+    for mt_mode in (MT_TAG4, MT_TAG7):
+        iteration = _m_trigger_tests(test_data, cg, mt_mode)
+        lines += _tag7(iteration) if mt_mode == MT_TAG7 else iteration
+    tc.code += [*_trigger_defines(), *gated(lines, f"({NO_BARE_VITT_RANGE}) && {TRIGGER_CAPABLE}")]
     tc.raw_data += [*_tag_table_data(), *_check_data()]
     return [test_data.end_test_chunk()]
 

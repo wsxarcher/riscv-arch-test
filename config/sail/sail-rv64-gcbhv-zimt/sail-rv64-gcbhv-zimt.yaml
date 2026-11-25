@@ -5,13 +5,14 @@ kind: architecture configuration
 type: fully configured
 name: sail-rv64-gcbhv-zimt
 description: >-
-  sargantana4-rv64gcbh-zimt (config/cores/sargantana) with V (VLEN 128, ELEN 64), for the
-  Sail model itself: the Zimt cases that need both S-mode and V (the vector accesses with
-  mstatus.MPRV = 1 and MPP = S of Zimt_Sm_checktag) run on no other configuration, as
-  Sargantana claims no V and sail-rv64-m-zimt and sail-rv64-mu-zimt have no S-mode.  The
-  vector parameters are sail-rv64-max's, except VLEN and MUTABLE_MISA_V; misaligned vector
-  elements are performed, as in Sargantana's sail.json.  The comments below describe
-  Sargantana, whose RTL fixes the other parameters.
+  sargantana4-rv64gcbh-zimt (config/cores/sargantana) with V (VLEN 128, ELEN 64) and Sdtrig
+  (4 mcontrol6 triggers), for the Sail model itself: the Zimt cases that need both S-mode and
+  V (the vector accesses with mstatus.MPRV = 1 and MPP = S of Zimt_Sm_checktag), and S-mode
+  and Sdtrig (Zimt_Sm_trigger), run on no other configuration, as Sargantana claims neither V
+  nor Sdtrig and sail-rv64-m-zimt and sail-rv64-mu-zimt have no S-mode.  The vector
+  parameters are sail-rv64-max's, except VLEN and MUTABLE_MISA_V; misaligned vector elements
+  are performed, as in Sargantana's sail.json.  The comments below describe Sargantana, whose
+  RTL fixes the other parameters.
 #
 # The ISA string comes from the misa constant, def_pkg::ISA_CODE:
 #   "| (1   <<  1)  // B - Bit Manipulation extension
@@ -182,8 +183,14 @@ implemented_extensions:
   # "mstateen0-3" and "sstateen0-3" are implemented with the SE and ENVCFG bits writable:
   #   "mask = riscv_pkg::MSTATEEN0_SE | riscv_pkg::MSTATEEN0_ENVCFG;"
   #   https://github.com/bsc-loca/csr/blob/40a00a0ed81e8323ddb2110b9d64e4b6e497fe69/rtl/csr_bsc.sv#L1744-L1763
+  # With Zimt (def_pkg::RV_ZIMT), the MT bit of mstateen0 and hstateen0 (bit 53, the placeholder of the Sail
+  # model, which UDB does not define) is writable too ("riscv_pkg::MSTATEEN0_MT", "riscv_pkg::HSTATEEN0_MT"),
+  # as "MT" in sail.json
   - { name: Smstateen, version: "= 1.0.0" }
   - { name: Ssstateen, version: "= 1.0.0" }
+  # Not in Sargantana: the mcontrol6 triggers of the Sail model, which sail.json configures for the cases of
+  # Zimt_Sm_trigger, which no Sargantana configuration runs
+  - { name: Sdtrig, version: "= 1.0.0" }
   # "| (1   << 20)  // U - User mode implemented" / "| (1   << 18)  // S - Supervisor mode implemented"
   - { name: U, version: "= 1.0.0" }
   - { name: S, version: "= 1.12.0" }
@@ -988,3 +995,42 @@ params:
     - true
     - true
     - true
+  # Sdtrig (not in Sargantana, see implemented_extensions): 4 mcontrol6 triggers, as in sail.json, with the interrupt
+  # enables for reentrancy, as medeleg[3] is writable; no icount, itrigger or etrigger triggers, and no context CSRs
+  DBG_HCONTEXT_WIDTH: 14
+  DBG_SCONTEXT_WIDTH: 32
+  DCSR_MPRVEN_TYPE: rw
+  DCSR_STEPIE_TYPE: rw
+  DCSR_STOPCOUNT_TYPE: rw
+  DCSR_STOPTIME_TYPE: rw
+  MCONTEXT_IMPLEMENTED: false
+  SCONTEXT_IMPLEMENTED: false
+  HCONTEXT_IMPLEMENTED: false
+  MSTATEEN_CONTEXT_TYPE: read-only-0
+  HSTATEEN_CONTEXT_TYPE: read-only-0
+  SDTRIG_NUM_TRIGGERS: 4
+  SDTRIG_BREAKPOINT_REENTRANCY: Use_interrupt_enables
+  TCONTROL_IMPLEMENTED: false
+  TDATA2_IMPLEMENTED: true
+  TDATA3_IMPLEMENTED: true
+  SDTRIG_M_WRITABLE: true
+  SDTRIG_S_WRITABLE: true
+  SDTRIG_U_WRITABLE: true
+  SDTRIG_VS_WRITABLE: true
+  SDTRIG_VU_WRITABLE: true
+  SDTRIG_MCONTROL6_SUPPORTED_TRIGGERS: [true, true, true, true]
+  SDTRIG_ICOUNT_SUPPORTED_TRIGGERS: [false, false, false, false]
+  SDTRIG_ITRIGGER_SUPPORTED_TRIGGERS: [false, false, false, false]
+  SDTRIG_ETRIGGER_SUPPORTED_TRIGGERS: [false, false, false, false]
+  SDTRIG_MCONTROL6_MASKMAX6: 63
+  SDTRIG_MAX_CHAIN_LENGTH: 4
+  SDTRIG_MCONTROL6_MATCH_LEGAL_VALUES: [0, 1, 2, 3, 4, 5, 8, 9, 12, 13]
+  SDTRIG_MCONTROL6_SIZE_LEGAL_VALUES: [0, 1, 2, 3, 4, 5]
+  SDTRIG_MCONTROL6_SELECT_WRITABLE: true
+  SDTRIG_MCONTROL6_EXECUTE_WRITABLE: true
+  SDTRIG_MCONTROL6_LOAD_WRITABLE: true
+  SDTRIG_MCONTROL6_STORE_WRITABLE: true
+  SDTRIG_TEXTRA_MHVALUE_LEN: 13
+  SDTRIG_TEXTRA_SVALUE_LEN: 32
+  SDTRIG_TEXTRA_MHSELECT_VMID_MATCH: true
+  SDTRIG_TEXTRA_SSELECT_ASID_MATCH: true

@@ -1374,12 +1374,21 @@
       // mstateen0.CTR = 1: Enable access to control transfer record state
       // mstateen0.JVT = 1: Enable access to jvt for Zcmt
       // mstateen0.FCSR = 1: Enable access to floating-point CSRs for Zfinx
+      // mstateen0.MT = 1 (Zimt): Enable access to the Zimt and Svatag CSRs of S-mode and HS-mode
+      // (experimental, RV64 only; its position is a placeholder, rvtest_experimental.h). It is
+      // written with the other bits (as is hstateen0.MT below), not by a csrs of its own, which
+      // the coverage of the test that sets it would count.
       // Keep custom state and reserved bits disabled.
+      #if defined(ZIMT_SUPPORTED) && defined(MSTATEEN0_MT)
+        #define RVTEST_STATEEN0_MT MSTATEEN0_MT
+      #else
+        #define RVTEST_STATEEN0_MT 0
+      #endif
       #ifdef SMSTATEEN_SUPPORTED
         #if __riscv_xlen == 64
           LI(t0, MSTATEEN_HSTATEEN | MSTATEEN0_HENVCFG | MSTATEEN0_CSRIND | MSTATEEN0_AIA | \
                  MSTATEEN0_IMSIC | MSTATEEN0_HCONTEXT | MSTATEEN0_PRIV113 | MSTATEEN0_PRIV114 | \
-                 MSTATEEN0_CTR | MSTATEEN0_JVT | MSTATEEN0_FCSR)
+                 MSTATEEN0_CTR | MSTATEEN0_JVT | MSTATEEN0_FCSR | RVTEST_STATEEN0_MT)
           csrw mstateen0, t0
         #else    // RV32
           LI(t0, MSTATEENH_HSTATEEN | MSTATEEN0H_HENVCFG | MSTATEEN0H_CSRIND | MSTATEEN0H_AIA | \
@@ -1604,6 +1613,8 @@
         // hstateen0.CTR = 1: Enable access to control transfer record state
         // hstateen0.JVT = 1: Enable access to jvt for Zcmt
         // hstateen0.FCSR = 1: Enable access to floating-point CSRs for Zfinx
+        // hstateen0.MT = 1 (Zimt): Enable access to the Zimt and Svatag CSRs of S-mode from VS-mode
+        // (experimental, as mstateen0.MT above)
         // Keep custom state and reserved bits disabled. hstateen0 has no P1P13 or SRMCFG
         // bit; that state is M-level only. A bit whose feature is not implemented reads
         // as zero, so enabling the whole set costs nothing on a smaller hart.
@@ -1611,7 +1622,7 @@
           #if __riscv_xlen == 64
             LI(t0, HSTATEEN_SSTATEEN | HSTATEEN0_SENVCFG | HSTATEEN0_CSRIND | HSTATEEN0_AIA | \
                    HSTATEEN0_IMSIC | HSTATEEN0_SCONTEXT | HSTATEEN0_CTR | HSTATEEN0_JVT | \
-                   HSTATEEN0_FCSR)
+                   HSTATEEN0_FCSR | RVTEST_STATEEN0_MT)
             csrw hstateen0, t0
           #else    // RV32
             LI(t0, HSTATEENH_SSTATEEN | HSTATEEN0H_SENVCFG | HSTATEEN0H_CSRIND | HSTATEEN0H_AIA | \

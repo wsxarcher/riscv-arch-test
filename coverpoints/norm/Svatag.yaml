@@ -24,6 +24,18 @@ normative_rule_definitions:
   - name: svatag_vitt_acc
     coverpoint: ["{Svatag_S_cg, Svatag_H_cg}/cp_vitt_access"]
 
+  # With Smstateen, an access to svittu, svitts, vsvitts and vsvittu from a mode less privileged than M raises an
+  # illegal instruction exception while mstateen0.MT = 0; with Ssstateen, one to svitts and svittu from VS-mode raises
+  # a virtual instruction exception while hstateen0.MT = 0 and mstateen0.MT = 1, and with hstateen0.MT = 1 uses
+  # vsvitts and vsvittu. The MT bit is not allocated yet: the tests use bit 53, the placeholder of the Sail model.
+  # The tests run with M-mode (Zimt_Sm_stateen), which sets the bits: a certification without M-mode (EXCLUDE_SM) does
+  # not cover the rule, nor does any test cover the case of Ssstateen without Smstateen.
+  - name: svatag_stateen_mt
+    coverpoint:
+      [
+        "Zimt_Sm_cg/{cp_mstateen0_mt_write, cp_hstateen0_mt_write, cp_hstateen0_mt_masked, cp_stateen_mt_m, cp_stateen_mt_m_level, cp_stateen_mt_forms, cp_stateen_mt_s_off, cp_stateen_mt_s_on, cp_stateen_mt_u, cp_stateen_mt_v_off, cp_stateen_mt_vs_h_off, cp_stateen_mt_vs_h_on, cp_stateen_mt_vs_hcsr, cp_stateen_mt_vu_on}",
+      ]
+
   # HLV and HSV use vsvittu or vsvitts as the base of the tag table, as hstatus.SPVP = 0 or 1 selects. The Zimt HLV and
   # HSV tests use the table of the selected guest mode, and in cp_hlsv_checked that of the other one holds the opposite
   # tag.
